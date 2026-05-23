@@ -33,66 +33,88 @@ def collate_fn(batch, pad_value=0):
 
 
 def load_tinystories_from_modelscope_direct(num_samples=50000):
-    """Try ModelScope API with different parameters to avoid verification_mode bug."""
-    try:
-        from modelscope.msdatasets import MsDataset
-        ds_raw = MsDataset.load('TinyStories', namespace='AI-ModelScope', split='train')
-        texts = []
-        for item in ds_raw:
-            if isinstance(item, dict):
-                text = item.get('text', item.get('story', ''))
-                if text and len(text.strip()) > 10:
-                    texts.append(text.strip())
-            if len(texts) >= num_samples:
-                break
-        if texts:
-            print(f"ModelScope API: loaded {len(texts)} stories")
-            return texts
-    except:
-        pass
+    """Try multiple approaches to get TinyStories from ModelScope."""
 
-    # Try direct parquet read from cache
-    cache_dir = os.path.expanduser("~/.cache/modelscope/hub/datasets")
-    if not os.path.exists(cache_dir):
-        return None
+    # Approach 1: Direct parquet download from ModelScope CDN
+    print("  Trying ModelScope CDN direct download...")
+    parquet_urls = [
+        "https://www.modelscope.cn/api/v1/datasets/AI-ModelScope/TinyStories/repo?Source=SDK&Revision=master&FilePath=data/train-00000-of-00004-2d5a1467fff1081b.parquet&View=False",
+        "https://www.modelscope.cn/api/v1/datasets/AI-ModelScope/TinyStories/repo?Source=SDK&Revision=master&FilePath=data/train-00001-of-00004-5852b56a2bd28fd9.parquet&View=False",
+        "https://www.modelscope.cn/api/v1/datasets/AI-ModelScope/TinyStories/repo?Source=SDK&Revision=master&FilePath=data/train-00002-of-00004-a26307300439e943.parquet&View=False",
+        "https://www.modelscope.cn/api/v1/datasets/AI-ModelScope/TinyStories/repo?Source=SDK&Revision=master&FilePath=data/train-00003-of-00004-d243063613e5a057.parquet&View=False",
+    ]
 
-    parquet_files = []
-    for root, dirs, files in os.walk(cache_dir):
-        for f in files:
-            if f.endswith(".parquet") and "train" in f.lower():
-                parquet_files.append(os.path.join(root, f))
-
-    if not parquet_files:
-        return None
-
-    print(f"Found {len(parquet_files)} parquet files in ModelScope cache")
     try:
         import pyarrow.parquet as pq
         texts = []
-        for pf in sorted(parquet_files):
+        for url in parquet_urls:
+            if len(texts) >= num_samples:
+                break
             try:
-                table = pq.read_table(pf)
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    raw = resp.read()
+                import io
+                table = pq.read_table(io.BytesIO(raw))
                 for i in range(len(table)):
                     row = table[i].as_py()
                     if isinstance(row, dict):
                         text = row.get('text', row.get('story', ''))
                     else:
-                        text = str(row)
+                        continue
                     if text and len(text.strip()) > 10:
                         texts.append(text.strip())
                     if len(texts) >= num_samples:
                         break
-                if len(texts) >= num_samples:
-                    break
+                print(f"  Downloaded parquet: {len(texts)} texts so far")
             except Exception as e:
-                print(f"  Failed to read {pf}: {e}")
+                print(f"  Parquet download failed: {e}")
+                continue
+
         if texts:
-            print(f"ModelScope cache: loaded {len(texts)} stories from parquet")
+            print(f"ModelScope CDN: loaded {len(texts)} stories")
             return texts[:num_samples]
     except ImportError:
-        print("pyarrow not available")
+        print("  pyarrow not available")
     except Exception as e:
-        print(f"Parquet read failed: {e}")
+        print(f"  CDN download failed: {e}")
+
+    # Approach 2: Read from local ModelScope cache (if files were downloaded before)
+    cache_dir = os.path.expanduser("~/.cache/modelscope/hub/datasets")
+    if os.path.exists(cache_dir):
+        parquet_files = []
+        for root, dirs, files in os.walk(cache_dir):
+            for f in files:
+                if f.endswith(".parquet") and "train" in f.lower():
+                    parquet_files.append(os.path.join(root, f))
+        if parquet_files:
+            print(f"  Found {len(parquet_files)} cached parquet files")
+            try:
+                import pyarrow.parquet as pq
+                texts = []
+                for pf in sorted(parquet_files):
+                    try:
+                        table = pq.read_table(pf)
+                        for i in range(len(table)):
+                            row = table[i].as_py()
+                            if isinstance(row, dict):
+                                text = row.get('text', row.get('story', ''))
+                            else:
+                                continue
+                            if text and len(text.strip()) > 10:
+                                texts.append(text.strip())
+                            if len(texts) >= num_samples:
+                                break
+                        if len(texts) >= num_samples:
+                            break
+                    except:
+                        pass
+                if texts:
+                    print(f"ModelScope cache: loaded {len(texts)} stories")
+                    return texts[:num_samples]
+            except:
+                pass
+
     return None
 
 
