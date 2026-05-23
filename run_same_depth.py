@@ -32,13 +32,30 @@ def collate_fn(batch, pad_value=0):
     return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": input_ids.clone()}
 
 
-def load_tinystories_from_modelscope_cache(num_samples=50000):
-    """Read TinyStories parquet files directly from ModelScope cache."""
+def load_tinystories_from_modelscope_direct(num_samples=50000):
+    """Try ModelScope API with different parameters to avoid verification_mode bug."""
+    try:
+        from modelscope.msdatasets import MsDataset
+        ds_raw = MsDataset.load('TinyStories', namespace='AI-ModelScope', split='train')
+        texts = []
+        for item in ds_raw:
+            if isinstance(item, dict):
+                text = item.get('text', item.get('story', ''))
+                if text and len(text.strip()) > 10:
+                    texts.append(text.strip())
+            if len(texts) >= num_samples:
+                break
+        if texts:
+            print(f"ModelScope API: loaded {len(texts)} stories")
+            return texts
+    except:
+        pass
+
+    # Try direct parquet read from cache
     cache_dir = os.path.expanduser("~/.cache/modelscope/hub/datasets")
     if not os.path.exists(cache_dir):
         return None
 
-    # Find parquet files
     parquet_files = []
     for root, dirs, files in os.walk(cache_dir):
         for f in files:
@@ -59,10 +76,7 @@ def load_tinystories_from_modelscope_cache(num_samples=50000):
                     row = table[i].as_py()
                     if isinstance(row, dict):
                         text = row.get('text', row.get('story', ''))
-                    elif isinstance(row, str):
-                        text = row
                     else:
-                        # Try to find text field
                         text = str(row)
                     if text and len(text.strip()) > 10:
                         texts.append(text.strip())
@@ -76,14 +90,14 @@ def load_tinystories_from_modelscope_cache(num_samples=50000):
             print(f"ModelScope cache: loaded {len(texts)} stories from parquet")
             return texts[:num_samples]
     except ImportError:
-        print("pyarrow not available, cannot read parquet")
+        print("pyarrow not available")
     except Exception as e:
         print(f"Parquet read failed: {e}")
     return None
 
 
 def load_wikitext2(num_samples=50000):
-    """Load wikitext-2 from S3, fallback to ModelScope cache, then demo."""
+    """Load wikitext-2 from S3, fallback to ModelScope, then demo."""
     print("Downloading wikitext-2 (~33MB)...")
 
     # Try S3
@@ -102,8 +116,8 @@ def load_wikitext2(num_samples=50000):
     except Exception as e:
         print(f"  S3 failed: {e}")
 
-    # Try ModelScope cache (parquet files already downloaded)
-    texts = load_tinystories_from_modelscope_cache(num_samples)
+    # Try ModelScope (API then cache)
+    texts = load_tinystories_from_modelscope_direct(num_samples)
     if texts:
         return texts
 
