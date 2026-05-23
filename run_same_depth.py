@@ -2,6 +2,8 @@
 PoE has 26 equivalent layers (parallel), Baseline has 11 (serial).
 Same d_model=768, same serial depth=11."""
 import os
+import re
+import urllib.request
 import torch
 from torch.utils.data import DataLoader, random_split
 from alpha_eai.config import PoEConfig
@@ -9,9 +11,6 @@ from alpha_eai.model import PoEModel
 from alpha_eai.baseline import BaselineTransformer
 from training.train import train, evaluate
 from training.dataset import make_tokenizer
-
-
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 
 def count(p):
@@ -62,12 +61,34 @@ def main():
     print(f"PoE capacity = {26/11:.1f}x Baseline capacity, same serial depth")
     print()
 
-    # === Data: TinyStories from HuggingFace ===
-    print("Loading TinyStories from HuggingFace (hf-mirror)...")
-    from datasets import load_dataset
-    ds_raw = load_dataset('Salesforce/tiny_stories', split='train', streaming=True)
-    texts = [item['text'] for _, item in zip(range(50000), ds_raw)]
-    print(f"TinyStories: {len(texts)} samples")
+    # === Data: wikitext-2 from GitHub raw, fallback to demo ===
+    print("Loading wikitext-2 from GitHub...")
+    texts = None
+    try:
+        url = "https://raw.githubusercontent.com/salesforce/awd-lstm-lm/master/data/wikitext-2/train.txt"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8")
+        texts = [s.strip() for s in raw.split("\n") if len(s.strip()) > 20]
+        print(f"GitHub: loaded {len(texts)} lines")
+    except Exception as e:
+        print(f"GitHub download failed ({e}), trying HuggingFace CDN...")
+        try:
+            url = "https://cdn-lfs.huggingface.co/repos/Salesforce/tiny_stories/..."
+            from datasets import load_dataset
+            ds = load_dataset('Salesforce/tiny_stories', split='train', streaming=True)
+            texts = [item['text'] for _, item in zip(range(50000), ds)]
+            print(f"HuggingFace: loaded {len(texts)} stories")
+        except Exception as e2:
+            print(f"HuggingFace also failed ({e2}), falling back to demo data...")
+            texts = None
+
+    if texts is None:
+        from training.data_demo import make_demo_data
+        texts = make_demo_data()
+        print(f"Using demo data: {len(texts)} samples")
+
+    tokenizer = make_tokenizer(type("C", (), {"vocab_size": 50257})())
 
     class DS(torch.utils.data.Dataset):
         def __init__(self, texts, tok, ms):
