@@ -56,13 +56,14 @@ def load_tinystories_from_modelscope_direct(num_samples=50000):
                     raw = resp.read()
                 import io
                 table = pq.read_table(io.BytesIO(raw))
-                for i in range(len(table)):
-                    row = table[i].as_py()
-                    if isinstance(row, dict):
-                        text = row.get('text', row.get('story', ''))
-                    else:
-                        continue
-                    if text and len(text.strip()) > 10:
+                for c in table.column_names:
+                    if c in ('text', 'story', 'content', 'article'):
+                        col_name = c
+                        break
+                else:
+                    col_name = table.column_names[0]
+                for text in table.column(col_name).to_pylist():
+                    if text and isinstance(text, str) and len(text.strip()) > 10:
                         texts.append(text.strip())
                     if len(texts) >= num_samples:
                         break
