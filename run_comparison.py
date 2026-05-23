@@ -5,7 +5,7 @@ from alpha_eai.config import PoEConfig
 from alpha_eai.model import PoEModel
 from alpha_eai.baseline import BaselineTransformer
 from training.dataset import make_tokenizer
-from training.data_demo import make_data_loader as make_demo_loader, make_demo_data
+from training.data_demo import make_demo_data
 from training.train import train, evaluate
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data import random_split
@@ -39,18 +39,13 @@ def collate_fn(batch, pad_value=0):
 
 
 def make_split_loaders(tokenizer, config, train_ratio=0.8):
-    from torch.utils.data import DataLoader
     texts = make_demo_data()
     ds = TextDataset(texts, tokenizer, config.max_seq_len)
     train_size = int(len(ds) * train_ratio)
     val_size = len(ds) - train_size
     train_ds, val_ds = random_split(ds, [train_size, val_size])
-
-    def collate(batch):
-        return collate_fn(batch)
-
-    train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True, collate_fn=collate)
-    val_loader = DataLoader(val_ds, batch_size=config.batch_size, shuffle=False, collate_fn=collate)
+    train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True, collate_fn=collate_fn)
+    val_loader = DataLoader(val_ds, batch_size=config.batch_size, shuffle=False, collate_fn=collate_fn)
     return train_loader, val_loader
 
 
@@ -59,9 +54,9 @@ def count_params(model):
 
 
 def run_comparison(args):
-    print("=" * 60)
-    print("  Alpha EAI vs Baseline Transformer Comparison")
-    print("=" * 60)
+    print("=" * 70)
+    print("  Alpha EAI vs Standard Transformer — Same Serial Depth")
+    print("=" * 70)
 
     config = PoEConfig(
         batch_size=args.batch_size,
@@ -76,87 +71,75 @@ def run_comparison(args):
     print(f"Val:   {len(val_loader.dataset)} samples ({len(val_loader)} batches)")
 
     # ---- Model A: PoE ----
-    print("\n" + "=" * 60)
-    print("  Model A: PoE (4 experts × 5 + 6 post-processing)")
-    print("=" * 60)
+    # Serial depth: 5 (expert) + 6 (PP) = 11 layers
+    # Capacity: 4×5 + 6 = 26 equivalent layers (experts run in parallel)
+    # Active params (k=2): ~35M
+    print("\n" + "=" * 70)
+    print("  Model A: PoE — 4 experts × 5 layers + 6 post-processing")
+    print("  Serial depth: 11 | Capacity equivalent: 26 layers")
+    print("=" * 70)
 
     poe_config = PoEConfig(
-        num_experts=4,
-        expert_num_layers=5,
-        post_processing_num_layers=6,
-        d_model=256,
-        n_head=4,
-        d_ff=512,
-        top_k=2,
-        max_seq_len=128,
-        batch_size=args.batch_size,
-        num_epochs=args.epochs,
-        learning_rate=3e-4,
+        num_experts=4, expert_num_layers=5, post_processing_num_layers=6,
+        d_model=256, n_head=4, d_ff=512, top_k=2, max_seq_len=128,
+        batch_size=args.batch_size, num_epochs=args.epochs, learning_rate=3e-4,
     )
     poe = PoEModel(poe_config)
-    print(f"Params: {count_params(poe):,}")
+    total_p = count_params(poe)
+    active_p = 2 * count_params(poe.experts[0]) + count_params(poe.post_processing) + \
+               count_params(poe.wte) + count_params(poe.wpe) + count_params(poe.router) + \
+               count_params(poe.fusion) + count_params(poe.lm_head)
+
+    print(f"Total params: {total_p:,}")
+    print(f"Active params (k=2): {active_p:,}")
+    print(f"Serial depth: 5 + 6 = 11 layers")
+    print(f"Capacity: 4 × 5 + 6 = 26 equivalent layers")
 
     print("Training PoE...")
     poe = train(poe, train_loader, poe_config, val_loader)
     poe_metrics = evaluate(poe, val_loader, next(poe.parameters()).device)
-    print(f"PoE Results: loss={poe_metrics['loss']:.4f} | ppl={poe_metrics['perplexity']:.2f} | acc={poe_metrics['accuracy']:.4f}")
+    print(f"PoE → loss={poe_metrics['loss']:.4f} | ppl={poe_metrics['perplexity']:.2f} | acc={poe_metrics['accuracy']:.4f}")
 
-    # ---- Model B: Baseline (same depth) ----
-    # PoE serial depth = 5 (expert internal) + 6 (post-processing) = 11
-    print("\n" + "=" * 60)
-    print("  Model B: Baseline (same depth, 11L, d=256)")
-    print("=" * 60)
+    # ---- Model B: Standard Transformer (same serial depth = 26 layers) ----
+    print("\n" + "=" * 70)
+    print("  Model B: Standard Transformer — 26 layers (same capacity as PoE)")
+    print("  Serial depth: 26 | Capacity equivalent: 26 layers")
+    print("=" * 70)
 
     baseline = BaselineTransformer(
-        num_layers=11,
-        d_model=256,
-        n_head=4,
-        d_ff=512,
-        max_seq_len=128,
+        num_layers=26, d_model=256, n_head=4, d_ff=512, max_seq_len=128,
     )
-    print(f"Params: {count_params(baseline):,}")
+    baseline_p = count_params(baseline)
+    print(f"Params: {baseline_p:,}")
+    print(f"Serial depth: 26 layers")
 
     print("Training Baseline...")
     baseline = train(baseline, train_loader, poe_config, val_loader)
     baseline_metrics = evaluate(baseline, val_loader, next(baseline.parameters()).device)
-    print(f"Baseline Results: loss={baseline_metrics['loss']:.4f} | ppl={baseline_metrics['perplexity']:.2f} | acc={baseline_metrics['accuracy']:.4f}")
-
-    # ---- Model C: Baseline (same active params ~74M, same depth) ----
-    # PoE active: k=2 experts (2*15.8M) + post-proc (16.3M) + embedding/router/fusion
-    #   ≈ 74M active params, serial depth = 5+6 = 11 layers
-    # Match: 16-layer Transformer, d_model=352 ≈ 68M + embedding ≈ 74M
-    print("\n" + "=" * 60)
-    print("  Model C: Baseline (same active ~74M, 16L, d_model=352)")
-    print("=" * 60)
-
-    baseline_big = BaselineTransformer(
-        num_layers=16,
-        d_model=352,
-        n_head=4,
-        d_ff=1408,
-        max_seq_len=128,
-    )
-    print(f"Params: {count_params(baseline_big):,}")
-
-    print("Training Baseline (big)...")
-    baseline_big = train(baseline_big, train_loader, poe_config, val_loader)
-    baseline_big_metrics = evaluate(baseline_big, val_loader, next(baseline_big.parameters()).device)
-    print(f"Baseline (big) Results: loss={baseline_big_metrics['loss']:.4f} | ppl={baseline_big_metrics['perplexity']:.2f} | acc={baseline_big_metrics['accuracy']:.4f}")
+    print(f"Baseline → loss={baseline_metrics['loss']:.4f} | ppl={baseline_metrics['perplexity']:.2f} | acc={baseline_metrics['accuracy']:.4f}")
 
     # ---- Summary ----
-    print("\n" + "=" * 60)
-    print("  COMPARISON SUMMARY")
-    print("=" * 60)
-    print(f"{'Model':<25} {'Params':>10} {'Loss':>8} {'PPL':>8} {'Acc':>8}")
-    print("-" * 60)
-    print(f"{'PoE (4×5+6, k=2 active)':<35} {count_params(poe):>10,} {poe_metrics['loss']:>8.4f} {poe_metrics['perplexity']:>8.2f} {poe_metrics['accuracy']:>8.4f}")
-    print(f"{'Baseline (11L, d=256)':<35} {count_params(baseline):>10,} {baseline_metrics['loss']:>8.4f} {baseline_metrics['perplexity']:>8.2f} {baseline_metrics['accuracy']:>8.4f}")
-    print(f"{'Baseline (16L, d=352, active ~74M)':<35} {count_params(baseline_big):>10,} {baseline_big_metrics['loss']:>8.4f} {baseline_big_metrics['perplexity']:>8.2f} {baseline_big_metrics['accuracy']:>8.4f}")
-    print("=" * 60)
+    print("\n" + "=" * 70)
+    print("  COMPARISON — Same Capacity (26 layers), Different Serial Depth")
+    print("=" * 70)
+    print(f"{'Model':<35} {'Serial':>7} {'Capacity':>9} {'Params':>10} {'Loss':>8} {'PPL':>10} {'Acc':>8}")
+    print("-" * 87)
+    print(f"{'PoE (4×5+6, k=2)':<35} {11:>7} {26:>9} {total_p:>10,} {poe_metrics['loss']:>8.4f} {poe_metrics['perplexity']:>10.2f} {poe_metrics['accuracy']:>8.4f}")
+    print(f"{'Baseline (26L)':<35} {26:>7} {26:>9} {baseline_p:>10,} {baseline_metrics['loss']:>8.4f} {baseline_metrics['perplexity']:>10.2f} {baseline_metrics['accuracy']:>8.4f}")
+    print("=" * 70)
+
+    print("\n  Key finding:")
+    ppl_diff = (baseline_metrics['perplexity'] - poe_metrics['perplexity']) / baseline_metrics['perplexity'] * 100
+    print(f"  PPL difference: {ppl_diff:+.1f}%")
+    if ppl_diff < 0:
+        print(f"  → PoE 在相同容量下 PPL 高出 {-ppl_diff:.1f}%，但串行深度只有 baseline 的 11/26 = {11/26*100:.0f}%")
+    else:
+        print(f"  → PoE 在相同容量下 PPL 低 {ppl_diff:.1f}%，且串行深度只有 baseline 的 11/26 = {11/26*100:.0f}%")
+    print(f"  → 推理速度理论上快 {26/11:.1f}x")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PoE vs Baseline Comparison")
+    parser = argparse.ArgumentParser(description="PoE vs Baseline — Same Serial Depth")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=4)
     args = parser.parse_args()
