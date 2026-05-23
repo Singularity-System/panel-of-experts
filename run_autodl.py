@@ -31,20 +31,21 @@ def load_data(num_samples=50000, batch_size=16, max_seq_len=256, val_ratio=0.1, 
 
     if use_modelscope:
         try:
-            print("Loading TinyStories from ModelScope (魔搭社区)...")
-            from modelscope.msdatasets import MsDataset
-            ds_raw = MsDataset.load('TinyStories', namespace='AI-ModelScope', split='train')
+            print("Loading TinyStories from HuggingFace (hf-mirror)...")
+            from datasets import load_dataset
+            ds_raw = load_dataset('Salesforce/tiny_stories', split='train', streaming=True)
             texts = []
+            count = 0
             for item in ds_raw:
-                if isinstance(item, dict) and 'text' in item:
-                    texts.append(item['text'])
-                elif isinstance(item, dict) and 'story' in item:
-                    texts.append(item['story'])
-            print(f"ModelScope: loaded {len(texts)} stories")
+                texts.append(item['text'])
+                count += 1
+                if count >= num_samples:
+                    break
+            print(f"HuggingFace: loaded {len(texts)} stories")
             if len(texts) == 0:
-                raise ValueError("No text found in ModelScope dataset")
+                raise ValueError("No text found in TinyStories dataset")
         except Exception as e:
-            print(f"ModelScope failed ({e}), falling back to local demo data...")
+            print(f"HuggingFace failed ({e}), falling back to local demo data...")
             texts = None
 
     if not use_modelscope or texts is None:

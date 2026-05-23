@@ -1,6 +1,7 @@
 """Same serial depth, different capacity: PoE vs Baseline.
 PoE has 26 equivalent layers (parallel), Baseline has 11 (serial).
 Same d_model=768, same serial depth=11."""
+import os
 import torch
 from torch.utils.data import DataLoader, random_split
 from alpha_eai.config import PoEConfig
@@ -8,7 +9,9 @@ from alpha_eai.model import PoEModel
 from alpha_eai.baseline import BaselineTransformer
 from training.train import train, evaluate
 from training.dataset import make_tokenizer
-from training.data_demo import make_demo_data
+
+
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 
 def count(p):
@@ -59,9 +62,12 @@ def main():
     print(f"PoE capacity = {26/11:.1f}x Baseline capacity, same serial depth")
     print()
 
-    # === Data ===
-    tokenizer = make_tokenizer(type("C", (), {"vocab_size": 50257})())
-    texts = make_demo_data()
+    # === Data: TinyStories from HuggingFace ===
+    print("Loading TinyStories from HuggingFace (hf-mirror)...")
+    from datasets import load_dataset
+    ds_raw = load_dataset('Salesforce/tiny_stories', split='train', streaming=True)
+    texts = [item['text'] for _, item in zip(range(50000), ds_raw)]
+    print(f"TinyStories: {len(texts)} samples")
 
     class DS(torch.utils.data.Dataset):
         def __init__(self, texts, tok, ms):
