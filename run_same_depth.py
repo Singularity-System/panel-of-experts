@@ -32,6 +32,24 @@ def collate_fn(batch, pad_value=0):
     return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": input_ids.clone()}
 
 
+def _read_parquet_texts(table, num_samples):
+    """Extract text strings from a pyarrow table, auto-detecting column."""
+    texts = []
+    col_name = None
+    for c in table.column_names:
+        if c in ('text', 'story', 'content', 'article'):
+            col_name = c
+            break
+    if col_name is None:
+        col_name = table.column_names[0]
+    for text in table.column(col_name).to_pylist():
+        if text and isinstance(text, str) and len(text.strip()) > 10:
+            texts.append(text.strip())
+        if len(texts) >= num_samples:
+            break
+    return texts
+
+
 def load_tinystories_from_modelscope_direct(num_samples=50000):
     """Try multiple approaches to get TinyStories from ModelScope."""
 
@@ -56,17 +74,7 @@ def load_tinystories_from_modelscope_direct(num_samples=50000):
                     raw = resp.read()
                 import io
                 table = pq.read_table(io.BytesIO(raw))
-                for c in table.column_names:
-                    if c in ('text', 'story', 'content', 'article'):
-                        col_name = c
-                        break
-                else:
-                    col_name = table.column_names[0]
-                for text in table.column(col_name).to_pylist():
-                    if text and isinstance(text, str) and len(text.strip()) > 10:
-                        texts.append(text.strip())
-                    if len(texts) >= num_samples:
-                        break
+                texts.extend(_read_parquet_texts(table, num_samples))
                 print(f"  Downloaded parquet: {len(texts)} texts so far")
             except Exception as e:
                 print(f"  Parquet download failed: {e}")
@@ -96,16 +104,7 @@ def load_tinystories_from_modelscope_direct(num_samples=50000):
                 for pf in sorted(parquet_files):
                     try:
                         table = pq.read_table(pf)
-                        for i in range(len(table)):
-                            row = table[i].as_py()
-                            if isinstance(row, dict):
-                                text = row.get('text', row.get('story', ''))
-                            else:
-                                continue
-                            if text and len(text.strip()) > 10:
-                                texts.append(text.strip())
-                            if len(texts) >= num_samples:
-                                break
+                        texts.extend(_read_parquet_texts(table, num_samples))
                         if len(texts) >= num_samples:
                             break
                     except:
