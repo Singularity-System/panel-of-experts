@@ -6,6 +6,7 @@ import re
 import urllib.request
 import zipfile
 import io
+import json
 import torch
 from torch.utils.data import DataLoader, random_split
 from alpha_eai.config import PoEConfig
@@ -31,28 +32,89 @@ def collate_fn(batch, pad_value=0):
     return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": input_ids.clone()}
 
 
+def load_tinystories_from_modelscope_cache(num_samples=50000):
+    """Read TinyStories parquet files directly from ModelScope cache."""
+    cache_dir = os.path.expanduser("~/.cache/modelscope/hub/datasets")
+    if not os.path.exists(cache_dir):
+        return None
+
+    # Find parquet files
+    parquet_files = []
+    for root, dirs, files in os.walk(cache_dir):
+        for f in files:
+            if f.endswith(".parquet") and "train" in f.lower():
+                parquet_files.append(os.path.join(root, f))
+
+    if not parquet_files:
+        return None
+
+    print(f"Found {len(parquet_files)} parquet files in ModelScope cache")
+    try:
+        import pyarrow.parquet as pq
+        texts = []
+        for pf in sorted(parquet_files):
+            try:
+                table = pq.read_table(pf)
+                for i in range(len(table)):
+                    row = table[i].as_py()
+                    if isinstance(row, dict):
+                        text = row.get('text', row.get('story', ''))
+                    elif isinstance(row, str):
+                        text = row
+                    else:
+                        # Try to find text field
+                        text = str(row)
+                    if text and len(text.strip()) > 10:
+                        texts.append(text.strip())
+                    if len(texts) >= num_samples:
+                        break
+                if len(texts) >= num_samples:
+                    break
+            except Exception as e:
+                print(f"  Failed to read {pf}: {e}")
+        if texts:
+            print(f"ModelScope cache: loaded {len(texts)} stories from parquet")
+            return texts[:num_samples]
+    except ImportError:
+        print("pyarrow not available, cannot read parquet")
+    except Exception as e:
+        print(f"Parquet read failed: {e}")
+    return None
+
+
 def load_wikitext2(num_samples=50000):
-    """Load wikitext-2 from MetaMind S3, fallback to demo."""
-    print("Downloading wikitext-2 from MetaMind S3 (~33MB)...")
+    """Load wikitext-2 from S3, fallback to ModelScope cache, then demo."""
+    print("Downloading wikitext-2 (~33MB)...")
+
+    # Try S3
     try:
         url = "https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v10.zip"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=120) as resp:
-            raw = resp.read()
-        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            train_txt = zf.read("wikitext-2/wiki.train.tokens").decode("utf-8")
-        texts = [s.strip() for s in train_txt.split("\n") if len(s.strip()) > 20]
-        texts = texts[:num_samples]
-        print(f"wikitext-2: {len(texts)} lines")
-        return texts
+            raw_zip = resp.read()
+        if len(raw_zip) > 100000:
+            with zipfile.ZipFile(io.BytesIO(raw_zip)) as zf:
+                train_txt = zf.read("wikitext-2/wiki.train.tokens").decode("utf-8")
+            texts = [s.strip() for s in train_txt.split("\n") if len(s.strip()) > 20]
+            texts = texts[:num_samples]
+            print(f"wikitext-2 S3: {len(texts)} lines")
+            return texts
     except Exception as e:
-        print(f"S3 failed ({e}), falling back to demo data...")
-        from training.data_demo import make_demo_data
-        texts = make_demo_data()
-        repeat = max(1, num_samples // len(texts))
-        texts = texts * repeat
-        print(f"Demo data: {len(texts)} samples (repeated {repeat}x)")
+        print(f"  S3 failed: {e}")
+
+    # Try ModelScope cache (parquet files already downloaded)
+    texts = load_tinystories_from_modelscope_cache(num_samples)
+    if texts:
         return texts
+
+    # Fallback to demo
+    print("All downloads failed, using demo data...")
+    from training.data_demo import make_demo_data
+    texts = make_demo_data()
+    repeat = max(1, num_samples // len(texts))
+    texts = texts * repeat
+    print(f"Demo data: {len(texts)} samples (repeated {repeat}x)")
+    return texts
 
 
 def main():
