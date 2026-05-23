@@ -40,14 +40,23 @@ class PoEModel(nn.Module):
         # === Multi-GPU expert distribution ===
         num_gpus = config.num_gpus if config.num_gpus > 0 else torch.cuda.device_count()
         if num_gpus > 1:
-            print(f"[PoE] Distributing {config.num_experts} experts across {num_gpus} GPUs")
-            self.expert_devices = []
-            for i, expert in enumerate(self.experts):
-                device_idx = i % num_gpus
-                self.expert_devices.append(torch.device(f"cuda:{device_idx}"))
-                expert.to(self.expert_devices[-1])
+            print(f"[PoE] Planning to distribute {config.num_experts} experts across {num_gpus} GPUs")
+            self.multi_gpu = True
         else:
-            self.expert_devices = [torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")] * config.num_experts
+            self.multi_gpu = False
+        self.expert_devices = [torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")] * config.num_experts
+
+    def _ensure_experts_on_device(self):
+        """Lazy expert device placement — called once before first forward."""
+        if not self.multi_gpu:
+            return
+        num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+        for i, expert in enumerate(self.experts):
+            dev = torch.device(f"cuda:{i % num_gpus}")
+            self.expert_devices[i] = dev
+            expert.to(dev)
+        self.multi_gpu = False  # only do this once
+        print(f"[PoE] Experts placed: {[str(d) for d in self.expert_devices]}")
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -75,6 +84,10 @@ class PoEModel(nn.Module):
             attention_mask = torch.ones_like(input_ids)
 
         main_device = input_ids.device
+
+        # Lazy multi-GPU expert placement (after model.to())
+        if getattr(self, 'multi_gpu', False):
+            self._ensure_experts_on_device()
 
         pos_ids = torch.arange(S, device=main_device).unsqueeze(0).expand(B, -1)
         x = self.wte(input_ids) + self.wpe(pos_ids)
