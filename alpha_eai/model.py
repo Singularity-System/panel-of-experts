@@ -37,26 +37,22 @@ class PoEModel(nn.Module):
         self.wte.weight = self.lm_head.weight
         self.apply(self._init_weights)
 
+        # Zero expert and post-processing wpe AFTER _init_weights to avoid double position encoding
+        for expert in self.experts:
+            expert.transformer.wpe.weight.data.zero_()
+        self.post_processing.transformer.wpe.weight.data.zero_()
+
         # === Multi-GPU expert distribution ===
         num_gpus = config.num_gpus if config.num_gpus > 0 else torch.cuda.device_count()
         if num_gpus > 1:
-            print(f"[PoE] Planning to distribute {config.num_experts} experts across {num_gpus} GPUs")
-            self.multi_gpu = True
+            print(f"[PoE] Distributing {config.num_experts} experts across {num_gpus} GPUs")
+            self.expert_devices = []
+            for i, expert in enumerate(self.experts):
+                device_idx = i % num_gpus
+                self.expert_devices.append(torch.device(f"cuda:{device_idx}"))
+                expert.to(self.expert_devices[-1])
         else:
-            self.multi_gpu = False
-        self.expert_devices = [torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")] * config.num_experts
-
-    def _ensure_experts_on_device(self):
-        """Lazy expert device placement — called once before first forward."""
-        if not self.multi_gpu:
-            return
-        num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-        for i, expert in enumerate(self.experts):
-            dev = torch.device(f"cuda:{i % num_gpus}")
-            self.expert_devices[i] = dev
-            expert.to(dev)
-        self.multi_gpu = False  # only do this once
-        print(f"[PoE] Experts placed: {[str(d) for d in self.expert_devices]}")
+            self.expert_devices = [torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")] * config.num_experts
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -77,6 +73,13 @@ class PoEModel(nn.Module):
                     active.add(e)
         return sorted(active)
 
+    def _fix_expert_device(self, e: int):
+        """Re-assign expert to its original device if model.to() moved it."""
+        target = self.expert_devices[e]
+        param = next(self.experts[e].parameters())
+        if param.device != target:
+            self.experts[e].to(target)
+
     def forward(self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None,
                 labels: Optional[torch.Tensor] = None) -> dict:
         B, S = input_ids.shape
@@ -84,10 +87,6 @@ class PoEModel(nn.Module):
             attention_mask = torch.ones_like(input_ids)
 
         main_device = input_ids.device
-
-        # Lazy multi-GPU expert placement (after model.to())
-        if getattr(self, 'multi_gpu', False):
-            self._ensure_experts_on_device()
 
         pos_ids = torch.arange(S, device=main_device).unsqueeze(0).expand(B, -1)
         x = self.wte(input_ids) + self.wpe(pos_ids)
@@ -108,39 +107,25 @@ class PoEModel(nn.Module):
                 token_expert_weight[:, :, e] += mask * wt_k
 
         # === True sparse: only compute active experts ===
-        # Parallel execution across GPUs using CUDA streams
         expert_outputs = torch.zeros(B, S, self.num_experts, D, device=main_device, dtype=x.dtype)
 
         # Group active experts by device for parallel execution
         device_experts = {}
         for e in active_experts:
             dev = self.expert_devices[e]
+            self._fix_expert_device(e)  # re-assign if model.to() moved it
             if dev not in device_experts:
                 device_experts[dev] = []
             device_experts[dev].append(e)
 
         is_cuda = main_device.type == "cuda"
 
-        # Async execution per device
-        sync_events = {}  # expert_idx -> sync event
+        # Execute per device
         for dev, dev_expert_list in device_experts.items():
             for e in dev_expert_list:
-                with torch.cuda.device(dev) if is_cuda else nullcontext():
-                    if is_cuda:
-                        dev_stream = torch.cuda.current_stream(dev)
-                    expert_input = x.to(dev)
-                    out = self.experts[e](expert_input, attention_mask.to(dev))
-                    out = out.to(main_device)
-                    expert_outputs[:, :, e, :] = out
-                    if is_cuda:
-                        sync_events[e] = dev_stream.record_event()
-
-        # Ensure all async operations complete on main device
-        if is_cuda:
-            with torch.cuda.device(main_device):
-                main_stream = torch.cuda.current_stream(main_device)
-                for e, event in sync_events.items():
-                    main_stream.wait_event(event)
+                expert_input = x.to(dev)
+                out = self.experts[e](expert_input, attention_mask.to(dev))
+                expert_outputs[:, :, e, :] = out.to(main_device)
 
         # Apply per-token weights: zero out unselected expert contributions
         weighted_experts = expert_outputs * token_expert_weight.unsqueeze(-1)

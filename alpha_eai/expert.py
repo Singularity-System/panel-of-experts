@@ -6,12 +6,12 @@ from typing import Optional
 
 class Expert(nn.Module):
     """Expert: GPT2 transformer blocks that accepts input_embeds directly.
-    Embedding layers are excluded to avoid redundant params."""
+    Position encoding is disabled to avoid duplication with PoEModel's wpe."""
 
     def __init__(self, num_layers: int = 5, d_model: int = 256, n_head: int = 4, d_ff: int = 512):
         super().__init__()
         hf_config = GPT2Config(
-            vocab_size=1,  # no embedding needed
+            vocab_size=1,
             n_layer=num_layers,
             n_embd=d_model,
             n_head=n_head,
@@ -19,7 +19,8 @@ class Expert(nn.Module):
             use_cache=False,
         )
         self.transformer = GPT2Model(hf_config)
-        # Remove the unused wte embedding (vocab_size=1 makes it tiny)
+        # Zero position embedding so it doesn't double-encode with PoEModel's wpe
+        self.transformer.wpe.weight.data.zero_()
         self.d_model = self.transformer.config.n_embd
 
     def forward(self, input_embeds: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
