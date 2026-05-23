@@ -29,6 +29,47 @@ def collate_fn(batch, pad_value=0):
     return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": input_ids.clone()}
 
 
+def load_wikitext2(num_samples=50000):
+    """Load wikitext-2 from GitHub raw, fallback to demo."""
+    print("Loading wikitext-2 from GitHub raw...")
+    try:
+        url = "https://raw.githubusercontent.com/salesforce/awd-lstm-lm/master/data/wikitext-2/train.txt"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8")
+        texts = [s.strip() for s in raw.split("\n") if len(s.strip()) > 20]
+        texts = texts[:num_samples]
+        print(f"GitHub wikitext-2: {len(texts)} lines")
+        return texts
+    except Exception as e:
+        print(f"GitHub failed ({e}), trying ModelScope TinyStories...")
+
+    # Try ModelScope (may work on AutoDL)
+    try:
+        from modelscope.msdatasets import MsDataset
+        ds_raw = MsDataset.load('TinyStories', namespace='AI-ModelScope', split='train')
+        texts = []
+        for item in ds_raw:
+            if isinstance(item, dict) and ('text' in item or 'story' in item):
+                texts.append(item.get('text', item.get('story', '')))
+            if len(texts) >= num_samples:
+                break
+        if texts:
+            print(f"ModelScope TinyStories: {len(texts)} stories")
+            return texts
+    except Exception as e2:
+        print(f"ModelScope also failed ({e2})")
+
+    # Fallback to demo
+    print("Falling back to demo data...")
+    from training.data_demo import make_demo_data
+    texts = make_demo_data()
+    repeat = max(1, num_samples // len(texts))
+    texts = texts * repeat
+    print(f"Demo data: {len(texts)} samples (repeated {repeat}x)")
+    return texts
+
+
 def main():
     cfg = PoEConfig(
         num_experts=4, expert_num_layers=5, post_processing_num_layers=6,
@@ -62,7 +103,6 @@ def main():
     print()
 
     # === Data: wikitext-2 from GitHub raw, fallback to demo ===
-    print("Loading wikitext-2 from GitHub...")
     texts = None
     try:
         url = "https://raw.githubusercontent.com/salesforce/awd-lstm-lm/master/data/wikitext-2/train.txt"
@@ -70,23 +110,12 @@ def main():
         with urllib.request.urlopen(req, timeout=30) as resp:
             raw = resp.read().decode("utf-8")
         texts = [s.strip() for s in raw.split("\n") if len(s.strip()) > 20]
-        print(f"GitHub: loaded {len(texts)} lines")
+        print(f"GitHub wikitext-2: {len(texts)} lines")
     except Exception as e:
-        print(f"GitHub download failed ({e}), trying HuggingFace CDN...")
-        try:
-            url = "https://cdn-lfs.huggingface.co/repos/Salesforce/tiny_stories/..."
-            from datasets import load_dataset
-            ds = load_dataset('Salesforce/tiny_stories', split='train', streaming=True)
-            texts = [item['text'] for _, item in zip(range(50000), ds)]
-            print(f"HuggingFace: loaded {len(texts)} stories")
-        except Exception as e2:
-            print(f"HuggingFace also failed ({e2}), falling back to demo data...")
-            texts = None
-
-    if texts is None:
+        print(f"GitHub failed ({e}), falling back to demo data...")
         from training.data_demo import make_demo_data
         texts = make_demo_data()
-        print(f"Using demo data: {len(texts)} samples")
+        print(f"Demo data: {len(texts)} samples")
 
     tokenizer = make_tokenizer(type("C", (), {"vocab_size": 50257})())
 
