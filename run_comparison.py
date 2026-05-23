@@ -104,7 +104,7 @@ def run_comparison(args):
     # ---- Model B: Baseline (same depth) ----
     # PoE serial depth = 5 (expert internal) + 6 (post-processing) = 11
     print("\n" + "=" * 60)
-    print("  Model B: Baseline (same depth, 11 layers)")
+    print("  Model B: Baseline (same depth, 11L, d=256)")
     print("=" * 60)
 
     baseline = BaselineTransformer(
@@ -121,18 +121,19 @@ def run_comparison(args):
     baseline_metrics = evaluate(baseline, val_loader, next(baseline.parameters()).device)
     print(f"Baseline Results: loss={baseline_metrics['loss']:.4f} | ppl={baseline_metrics['perplexity']:.2f} | acc={baseline_metrics['accuracy']:.4f}")
 
-    # ---- Model C: Baseline (same params ~92M) ----
-    # PoE has ~92M params. A plain Transformer with d_model=256 needs ~26 layers.
-    # 26 × (1.73M/layer) ≈ 45M + overhead ≈ ~92M
+    # ---- Model C: Baseline (same active params ~74M, same depth) ----
+    # PoE active: k=2 experts (2*15.8M) + post-proc (16.3M) + embedding/router/fusion
+    #   ≈ 74M active params, serial depth = 5+6 = 11 layers
+    # Match: 16-layer Transformer, d_model=352 ≈ 68M + embedding ≈ 74M
     print("\n" + "=" * 60)
-    print("  Model C: Baseline (same params ~92M, 26 layers)")
+    print("  Model C: Baseline (same active ~74M, 16L, d_model=352)")
     print("=" * 60)
 
     baseline_big = BaselineTransformer(
-        num_layers=26,
-        d_model=256,
+        num_layers=16,
+        d_model=352,
         n_head=4,
-        d_ff=512,
+        d_ff=1408,
         max_seq_len=128,
     )
     print(f"Params: {count_params(baseline_big):,}")
@@ -148,9 +149,9 @@ def run_comparison(args):
     print("=" * 60)
     print(f"{'Model':<25} {'Params':>10} {'Loss':>8} {'PPL':>8} {'Acc':>8}")
     print("-" * 60)
-    print(f"{'PoE (4×5+6)':<25} {count_params(poe):>10,} {poe_metrics['loss']:>8.4f} {poe_metrics['perplexity']:>8.2f} {poe_metrics['accuracy']:>8.4f}")
-    print(f"{'Baseline (11L)':<25} {count_params(baseline):>10,} {baseline_metrics['loss']:>8.4f} {baseline_metrics['perplexity']:>8.2f} {baseline_metrics['accuracy']:>8.4f}")
-    print(f"{'Baseline (26L)':<25} {count_params(baseline_big):>10,} {baseline_big_metrics['loss']:>8.4f} {baseline_big_metrics['perplexity']:>8.2f} {baseline_big_metrics['accuracy']:>8.4f}")
+    print(f"{'PoE (4×5+6, k=2 active)':<35} {count_params(poe):>10,} {poe_metrics['loss']:>8.4f} {poe_metrics['perplexity']:>8.2f} {poe_metrics['accuracy']:>8.4f}")
+    print(f"{'Baseline (11L, d=256)':<35} {count_params(baseline):>10,} {baseline_metrics['loss']:>8.4f} {baseline_metrics['perplexity']:>8.2f} {baseline_metrics['accuracy']:>8.4f}")
+    print(f"{'Baseline (16L, d=352, active ~74M)':<35} {count_params(baseline_big):>10,} {baseline_big_metrics['loss']:>8.4f} {baseline_big_metrics['perplexity']:>8.2f} {baseline_big_metrics['accuracy']:>8.4f}")
     print("=" * 60)
 
 
