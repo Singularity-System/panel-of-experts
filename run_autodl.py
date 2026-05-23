@@ -11,23 +11,7 @@ from alpha_eai.config import PoEConfig
 from alpha_eai.model import PoEModel
 from alpha_eai.baseline import BaselineTransformer
 from training.train import train, evaluate
-from training.data_demo import make_demo_data
 from training.dataset import make_tokenizer
-
-
-class TinyStoriesDataset(Dataset):
-    def __init__(self, samples, tokenizer, max_seq_len=256):
-        self.samples = samples
-        self.tokenizer = tokenizer
-        self.max_seq_len = max_seq_len
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        text = self.samples[idx]
-        encoded = self.tokenizer(text, return_tensors="pt", max_length=self.max_seq_len, truncation=True)
-        return encoded["input_ids"].squeeze(0)
 
 
 def collate_fn(batch, pad_value=0):
@@ -42,16 +26,35 @@ def collate_fn(batch, pad_value=0):
     return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": input_ids.clone()}
 
 
-def load_data_demo(num_samples=50000, batch_size=16, max_seq_len=256, val_ratio=0.1):
-    print(f"Loading local demo data...")
+def load_data(num_samples=50000, batch_size=16, max_seq_len=256, val_ratio=0.1, use_modelscope=True):
     tokenizer = make_tokenizer(type("C", (), {"vocab_size": 50257})())
-    texts = make_demo_data()
-    # Repeat to simulate more data if needed
-    repeat = max(1, num_samples // len(texts))
-    texts = texts * repeat
-    print(f"Collected {len(texts)} samples")
 
-    from torch.utils.data import DataLoader, Dataset
+    if use_modelscope:
+        try:
+            print("Loading TinyStories from ModelScope (魔搭社区)...")
+            from modelscope.msdatasets import MsDataset
+            ds_raw = MsDataset.load('TinyStories', namespace='AI-ModelScope', split='train')
+            texts = []
+            for item in ds_raw:
+                if isinstance(item, dict) and 'text' in item:
+                    texts.append(item['text'])
+                elif isinstance(item, dict) and 'story' in item:
+                    texts.append(item['story'])
+            print(f"ModelScope: loaded {len(texts)} stories")
+            if len(texts) == 0:
+                raise ValueError("No text found in ModelScope dataset")
+        except Exception as e:
+            print(f"ModelScope failed ({e}), falling back to local demo data...")
+            texts = None
+
+    if not use_modelscope or texts is None:
+        print("Loading local demo data...")
+        from training.data_demo import make_demo_data
+        texts = make_demo_data()
+        repeat = max(1, num_samples // len(texts))
+        texts = texts * repeat
+        print(f"Collected {len(texts)} samples (repeated {repeat}x)")
+
     from torch.utils.data import random_split
 
     class TextDataset(Dataset):
@@ -98,7 +101,7 @@ def main():
         for i in range(num_gpus):
             print(f"  GPU {i}: {torch.cuda.get_device_name(i)} ({torch.cuda.get_device_properties(i).total_memory / 1024**3:.0f}GB)")
 
-    train_loader, val_loader, tokenizer = load_data_demo(args.samples, args.batch_size, args.max_seq_len)
+    train_loader, val_loader, tokenizer = load_data(args.samples, args.batch_size, args.max_seq_len)
 
     config = PoEConfig(
         num_experts=4, expert_num_layers=5, post_processing_num_layers=6,

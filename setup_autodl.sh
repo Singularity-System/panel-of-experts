@@ -8,7 +8,7 @@ echo "=== Alpha EAI AutoDL 部署 ==="
 
 # 1. 安装依赖
 echo "[1/3] 安装依赖..."
-pip install datasets transformers accelerate -q
+pip install datasets transformers accelerate modelscope -q
 
 # 2. 设置 HF 镜像
 echo "[2/3] 设置 HF 镜像..."
@@ -21,8 +21,8 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 echo ""
 echo "=== 部署完成 ==="
 echo ""
-echo "运行训练:"
-echo "  python3 run_comparison.py --epochs 5 --batch-size 16"
+echo "运行训练 (本地 demo 数据):"
+echo "  python run_autodl.py --epochs 5 --batch-size 16"
 echo ""
-echo "运行 TinyStories 训练:"
-echo "  python3 run_mvp.py --use-tiny-stories --epochs 5 --batch-size 16"
+echo "运行训练 (ModelScope 真实 TinyStories):"
+echo "  python run_autodl.py --epochs 5 --batch-size 16 --samples 100000"
