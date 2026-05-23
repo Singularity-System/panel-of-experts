@@ -3,8 +3,6 @@ import os
 import torch
 import math
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoTokenizer, get_linear_schedule_with_warmup
-from datasets import load_dataset
 from tqdm import tqdm
 
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
@@ -13,6 +11,8 @@ from alpha_eai.config import PoEConfig
 from alpha_eai.model import PoEModel
 from alpha_eai.baseline import BaselineTransformer
 from training.train import train, evaluate
+from training.data_demo import make_demo_data
+from training.dataset import make_tokenizer
 
 
 class TinyStoriesDataset(Dataset):
@@ -42,27 +42,35 @@ def collate_fn(batch, pad_value=0):
     return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": input_ids.clone()}
 
 
-def load_data(num_samples=50000, batch_size=16, max_seq_len=256, val_ratio=0.1):
-    print(f"Loading TinyStories (mirror)...")
-    raw = load_dataset("the_cool_kid/tiny_stories", split="train", streaming=True)
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+def load_data_demo(num_samples=50000, batch_size=16, max_seq_len=256, val_ratio=0.1):
+    print(f"Loading local demo data...")
+    tokenizer = make_tokenizer(type("C", (), {"vocab_size": 50257})())
+    texts = make_demo_data()
+    # Repeat to simulate more data if needed
+    repeat = max(1, num_samples // len(texts))
+    texts = texts * repeat
+    print(f"Collected {len(texts)} samples")
 
-    print(f"Collecting {num_samples} samples...")
-    samples = []
-    for i, item in enumerate(raw):
-        samples.append(item["text"])
-        if len(samples) >= num_samples:
-            break
+    from torch.utils.data import DataLoader, Dataset
+    from torch.utils.data import random_split
 
-    val_size = int(len(samples) * val_ratio)
-    train_samples, val_samples = samples[val_size:], samples[:val_size]
+    class TextDataset(Dataset):
+        def __init__(self, texts, tokenizer, max_seq_len):
+            self.texts = texts
+            self.tokenizer = tokenizer
+            self.max_seq_len = max_seq_len
+        def __len__(self):
+            return len(self.texts)
+        def __getitem__(self, idx):
+            encoded = self.tokenizer(self.texts[idx], return_tensors="pt", max_length=self.max_seq_len, truncation=True)
+            return encoded["input_ids"].squeeze(0)
 
-    train_ds = TinyStoriesDataset(train_samples, tokenizer, max_seq_len)
-    val_ds = TinyStoriesDataset(val_samples, tokenizer, max_seq_len)
-
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, num_workers=2)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=2)
-
+    ds = TextDataset(texts, tokenizer, max_seq_len)
+    val_size = int(len(ds) * val_ratio)
+    train_size = len(ds) - val_size
+    train_ds, val_ds = random_split(ds, [train_size, val_size])
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=0)
     print(f"Train: {len(train_ds)} ({len(train_loader)} batches) | Val: {len(val_ds)} ({len(val_loader)} batches)")
     return train_loader, val_loader, tokenizer
 
@@ -90,7 +98,7 @@ def main():
         for i in range(num_gpus):
             print(f"  GPU {i}: {torch.cuda.get_device_name(i)} ({torch.cuda.get_device_properties(i).total_memory / 1024**3:.0f}GB)")
 
-    train_loader, val_loader, tokenizer = load_data(args.samples, args.batch_size, args.max_seq_len)
+    train_loader, val_loader, tokenizer = load_data_demo(args.samples, args.batch_size, args.max_seq_len)
 
     config = PoEConfig(
         num_experts=4, expert_num_layers=5, post_processing_num_layers=6,
