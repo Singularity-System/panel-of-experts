@@ -19,6 +19,7 @@ class PoEConfig:
     num_epochs: int = 3
     weight_decay: float = 0.01
     warmup_ratio: float = 0.05
+    num_gpus: int = 0  # 0 = auto-detect; distribute experts across GPUs
 
 
 @dataclass

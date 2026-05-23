@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from contextlib import nullcontext
 from typing import Optional, List
 
 from .config import PoEConfig
@@ -36,6 +37,18 @@ class PoEModel(nn.Module):
         self.wte.weight = self.lm_head.weight
         self.apply(self._init_weights)
 
+        # === Multi-GPU expert distribution ===
+        num_gpus = config.num_gpus if config.num_gpus > 0 else torch.cuda.device_count()
+        if num_gpus > 1:
+            print(f"[PoE] Distributing {config.num_experts} experts across {num_gpus} GPUs")
+            self.expert_devices = []
+            for i, expert in enumerate(self.experts):
+                device_idx = i % num_gpus
+                self.expert_devices.append(torch.device(f"cuda:{device_idx}"))
+                expert.to(self.expert_devices[-1])
+        else:
+            self.expert_devices = [torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")] * config.num_experts
+
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             module.weight.data.normal_(mean=0.0, std=0.02)
@@ -61,7 +74,9 @@ class PoEModel(nn.Module):
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
 
-        pos_ids = torch.arange(S, device=input_ids.device).unsqueeze(0).expand(B, -1)
+        main_device = input_ids.device
+
+        pos_ids = torch.arange(S, device=main_device).unsqueeze(0).expand(B, -1)
         x = self.wte(input_ids) + self.wpe(pos_ids)
         x = self.dropout(x)
 
@@ -71,20 +86,48 @@ class PoEModel(nn.Module):
         active_experts = self._get_active_experts(router_indices)
 
         # === Build per-token per-expert weight mask ===
-        # token_expert_weight[b, s, e] = sum of router_weights where expert e was selected
-        token_expert_weight = torch.zeros(B, S, self.num_experts, device=x.device, dtype=x.dtype)
+        token_expert_weight = torch.zeros(B, S, self.num_experts, device=main_device, dtype=x.dtype)
         for k in range(self.top_k):
-            idx_k = router_indices[:, :, k]   # (B, S)
-            wt_k = router_weights[:, :, k]     # (B, S)
+            idx_k = router_indices[:, :, k]
+            wt_k = router_weights[:, :, k]
             for e in range(self.num_experts):
                 mask = (idx_k == e).float()
                 token_expert_weight[:, :, e] += mask * wt_k
 
         # === True sparse: only compute active experts ===
-        expert_outputs = torch.zeros(B, S, self.num_experts, D, device=x.device, dtype=x.dtype)
+        # Parallel execution across GPUs using CUDA streams
+        expert_outputs = torch.zeros(B, S, self.num_experts, D, device=main_device, dtype=x.dtype)
+
+        # Group active experts by device for parallel execution
+        device_experts = {}
         for e in active_experts:
-            out = self.experts[e](x, attention_mask)
-            expert_outputs[:, :, e, :] = out
+            dev = self.expert_devices[e]
+            if dev not in device_experts:
+                device_experts[dev] = []
+            device_experts[dev].append(e)
+
+        is_cuda = main_device.type == "cuda"
+
+        # Async execution per device
+        sync_events = {}  # expert_idx -> sync event
+        for dev, dev_expert_list in device_experts.items():
+            for e in dev_expert_list:
+                with torch.cuda.device(dev) if is_cuda else nullcontext():
+                    if is_cuda:
+                        dev_stream = torch.cuda.current_stream(dev)
+                    expert_input = x.to(dev)
+                    out = self.experts[e](expert_input, attention_mask.to(dev))
+                    out = out.to(main_device)
+                    expert_outputs[:, :, e, :] = out
+                    if is_cuda:
+                        sync_events[e] = dev_stream.record_event()
+
+        # Ensure all async operations complete on main device
+        if is_cuda:
+            with torch.cuda.device(main_device):
+                main_stream = torch.cuda.current_stream(main_device)
+                for e, event in sync_events.items():
+                    main_stream.wait_event(event)
 
         # Apply per-token weights: zero out unselected expert contributions
         weighted_experts = expert_outputs * token_expert_weight.unsqueeze(-1)

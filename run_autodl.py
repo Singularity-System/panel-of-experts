@@ -83,7 +83,12 @@ def main():
     print("=" * 70)
     print("  Alpha EAI on TinyStories — AutoDL")
     print("=" * 70)
+    num_gpus = torch.cuda.device_count()
     print(f"GPU: {torch.cuda.get_device_name(0)} ({torch.cuda.get_device_properties(0).total_mem / 1024**3:.0f}GB)")
+    if num_gpus > 1:
+        print(f"Multi-GPU detected: {num_gpus} GPUs — experts will be distributed across GPUs")
+        for i in range(num_gpus):
+            print(f"  GPU {i}: {torch.cuda.get_device_name(i)} ({torch.cuda.get_device_properties(i).total_mem / 1024**3:.0f}GB)")
 
     train_loader, val_loader, tokenizer = load_data(args.samples, args.batch_size, args.max_seq_len)
 
@@ -91,7 +96,7 @@ def main():
         num_experts=4, expert_num_layers=5, post_processing_num_layers=6,
         d_model=256, n_head=4, d_ff=512, top_k=2, max_seq_len=args.max_seq_len,
         batch_size=args.batch_size, num_epochs=args.epochs, learning_rate=args.lr,
-        weight_decay=0.01, warmup_ratio=0.05,
+        weight_decay=0.01, warmup_ratio=0.05, num_gpus=num_gpus,
     )
 
     # ---- PoE ----
