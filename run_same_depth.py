@@ -4,6 +4,8 @@ Same d_model=768, same serial depth=11."""
 import os
 import re
 import urllib.request
+import zipfile
+import io
 import torch
 from torch.utils.data import DataLoader, random_split
 from alpha_eai.config import PoEConfig
@@ -30,44 +32,27 @@ def collate_fn(batch, pad_value=0):
 
 
 def load_wikitext2(num_samples=50000):
-    """Load wikitext-2 from GitHub raw, fallback to demo."""
-    print("Loading wikitext-2 from GitHub raw...")
+    """Load wikitext-2 from MetaMind S3, fallback to demo."""
+    print("Downloading wikitext-2 from MetaMind S3 (~33MB)...")
     try:
-        url = "https://raw.githubusercontent.com/salesforce/awd-lstm-lm/master/data/wikitext-2/train.txt"
+        url = "https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v10.zip"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode("utf-8")
-        texts = [s.strip() for s in raw.split("\n") if len(s.strip()) > 20]
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            raw = resp.read()
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            train_txt = zf.read("wikitext-2/wiki.train.tokens").decode("utf-8")
+        texts = [s.strip() for s in train_txt.split("\n") if len(s.strip()) > 20]
         texts = texts[:num_samples]
-        print(f"GitHub wikitext-2: {len(texts)} lines")
+        print(f"wikitext-2: {len(texts)} lines")
         return texts
     except Exception as e:
-        print(f"GitHub failed ({e}), trying ModelScope TinyStories...")
-
-    # Try ModelScope (may work on AutoDL)
-    try:
-        from modelscope.msdatasets import MsDataset
-        ds_raw = MsDataset.load('TinyStories', namespace='AI-ModelScope', split='train')
-        texts = []
-        for item in ds_raw:
-            if isinstance(item, dict) and ('text' in item or 'story' in item):
-                texts.append(item.get('text', item.get('story', '')))
-            if len(texts) >= num_samples:
-                break
-        if texts:
-            print(f"ModelScope TinyStories: {len(texts)} stories")
-            return texts
-    except Exception as e2:
-        print(f"ModelScope also failed ({e2})")
-
-    # Fallback to demo
-    print("Falling back to demo data...")
-    from training.data_demo import make_demo_data
-    texts = make_demo_data()
-    repeat = max(1, num_samples // len(texts))
-    texts = texts * repeat
-    print(f"Demo data: {len(texts)} samples (repeated {repeat}x)")
-    return texts
+        print(f"S3 failed ({e}), falling back to demo data...")
+        from training.data_demo import make_demo_data
+        texts = make_demo_data()
+        repeat = max(1, num_samples // len(texts))
+        texts = texts * repeat
+        print(f"Demo data: {len(texts)} samples (repeated {repeat}x)")
+        return texts
 
 
 def main():
@@ -102,20 +87,8 @@ def main():
     print(f"PoE capacity = {26/11:.1f}x Baseline capacity, same serial depth")
     print()
 
-    # === Data: wikitext-2 from GitHub raw, fallback to demo ===
-    texts = None
-    try:
-        url = "https://raw.githubusercontent.com/salesforce/awd-lstm-lm/master/data/wikitext-2/train.txt"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode("utf-8")
-        texts = [s.strip() for s in raw.split("\n") if len(s.strip()) > 20]
-        print(f"GitHub wikitext-2: {len(texts)} lines")
-    except Exception as e:
-        print(f"GitHub failed ({e}), falling back to demo data...")
-        from training.data_demo import make_demo_data
-        texts = make_demo_data()
-        print(f"Demo data: {len(texts)} samples")
+    # === Data: wikitext-2 from S3, fallback to demo ===
+    texts = load_wikitext2()
 
     tokenizer = make_tokenizer(type("C", (), {"vocab_size": 50257})())
 
