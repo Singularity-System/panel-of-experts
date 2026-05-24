@@ -34,7 +34,7 @@ class Router(nn.Module):
             return torch.tensor(0.0, device=self.gate_linear.weight.device)
 
         P = self._full_probs.mean(dim=[0, 1])  # (num_experts,) soft probs
-        flat_idx = self._indices.view(-1)
+        flat_idx = self._indices.reshape(-1)
         one_hot = torch.zeros(flat_idx.shape[0], self.num_experts, device=flat_idx.device)
         one_hot.scatter_(1, flat_idx.unsqueeze(1), 1.0)
         f = one_hot.float().mean(dim=0)  # (num_experts,) hard freqs
