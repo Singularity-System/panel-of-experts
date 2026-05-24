@@ -2,11 +2,9 @@
 PoE has 26 equivalent layers (parallel), Baseline has 11 (serial).
 Same d_model=768, same serial depth=11."""
 import os
-import re
-import urllib.request
-import zipfile
 import io
-import json
+import urllib.request
+import subprocess
 import torch
 from torch.utils.data import DataLoader, random_split
 from alpha_eai.config import PoEConfig
