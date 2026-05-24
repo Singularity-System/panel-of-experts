@@ -156,7 +156,7 @@ def main():
         num_experts=4, expert_num_layers=5, post_processing_num_layers=6,
         d_model=768, n_head=12, d_ff=3072, top_k=2, max_seq_len=256,
         batch_size=4, num_epochs=5, learning_rate=3e-4,
-        weight_decay=0.01, warmup_ratio=0.05,
+        weight_decay=0.01, warmup_ratio=0.05, lb_loss_weight=0.1,
     )
 
     # === PoE: serial=11, capacity=26 ===

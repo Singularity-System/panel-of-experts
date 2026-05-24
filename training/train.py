@@ -83,8 +83,37 @@ def train(model, dataloader, config, eval_dataloader=None):
     warmup_steps = int(total_steps * config.warmup_ratio)
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
 
+    # Router load balancing loss (Switch Transformer style)
+    lb_weight = getattr(config, "lb_loss_weight", 0.0)
+
     for epoch in range(1, config.num_epochs + 1):
-        avg_loss = train_epoch(model, dataloader, optimizer, scheduler, device, epoch)
+        model.train()
+        total_loss = 0
+        pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
+
+        for step, batch in enumerate(pbar):
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["labels"].to(device)
+
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            loss = outputs["loss"]
+
+            # Apply LB loss if model supports it
+            if lb_weight > 0 and hasattr(model, "auxiliary_load_balance_loss"):
+                lb_loss = model.auxiliary_load_balance_loss()
+                loss = loss + lb_weight * lb_loss
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            scheduler.step()
+
+            total_loss += outputs["loss"].item()
+            pbar.set_postfix({"loss": f"{outputs['loss'].item():.4f}"})
+
+        avg_loss = total_loss / len(dataloader)
 
         if eval_dataloader is not None:
             metrics = evaluate(model, eval_dataloader, device)

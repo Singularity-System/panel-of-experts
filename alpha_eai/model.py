@@ -141,3 +141,7 @@ class PoEModel(nn.Module):
             loss = nn.functional.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
 
         return {"loss": loss, "logits": logits}
+
+    def auxiliary_load_balance_loss(self) -> torch.Tensor:
+        """Router load balancing auxiliary loss. Add to main loss with config.lb_loss_weight."""
+        return self.router.auxiliary_load_balance_loss()
