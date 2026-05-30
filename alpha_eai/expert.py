@@ -17,6 +17,8 @@ class Expert(nn.Module):
             n_head=n_head,
             n_inner=d_ff,
             use_cache=False,
+            bos_token_id=None,
+            eos_token_id=None,
         )
         self.transformer = GPT2Model(hf_config)
         # Zero position embedding so it doesn't double-encode with PoEModel's wpe

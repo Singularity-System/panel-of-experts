@@ -191,7 +191,9 @@ def evaluate(model, dataloader, device):
             sl = logits[..., :-1, :].contiguous()
             slb = batch["labels"][..., 1:].contiguous()
             sm = batch["attention_mask"][..., 1:].contiguous()
-            total_correct += ((sl.argmax(-1) == slb) & (sm == 1)).sum().item()
+            # Get accuracy per token to avoid OOM on large logits
+            preds = sl.argmax(-1)
+            total_correct += ((preds == slb.to(preds.device)) & (sm.to(preds.device) == 1)).sum().item()
             total_tokens += sm.sum().item()
     avg = total_loss / len(dataloader)
     return {"loss": avg, "ppl": math.exp(avg), "acc": total_correct / max(total_tokens, 1)}
