@@ -20,6 +20,7 @@ class PoEConfig:
     weight_decay: float = 0.01
     warmup_ratio: float = 0.05
     lb_loss_weight: float = 0.01  # router load balancing aux loss weight (0 to disable)
+    div_loss_weight: float = 0.0  # expert diversity (von Neumann entropy) weight (0 to disable)
     num_gpus: int = 0  # 0 = auto-detect; distribute experts across GPUs
 
 

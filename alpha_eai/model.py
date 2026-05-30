@@ -130,6 +130,9 @@ class PoEModel(nn.Module):
         # Apply per-token weights: zero out unselected expert contributions
         weighted_experts = expert_outputs * token_expert_weight.unsqueeze(-1)
 
+        # Save expert outputs for diversity loss (keep gradient)
+        self._last_expert_outputs = expert_outputs
+
         fused = self.fusion(weighted_experts, attention_mask)
         pp_out = self.post_processing(fused, attention_mask)
         logits = self.lm_head(pp_out)
@@ -145,3 +148,33 @@ class PoEModel(nn.Module):
     def auxiliary_load_balance_loss(self) -> torch.Tensor:
         """Router load balancing auxiliary loss. Add to main loss with config.lb_loss_weight."""
         return self.router.auxiliary_load_balance_loss()
+
+    def expert_diversity_loss(self) -> torch.Tensor:
+        """Von Neumann entropy of expert output covariance. Maximize for diversity."""
+        if not hasattr(self, '_last_expert_outputs') or self._last_expert_outputs is None:
+            return torch.tensor(0.0, device=self.wte.weight.device)
+
+        # (B, S, num_experts, D) → mean per expert (B, S) → (num_experts, D)
+        mean_out = self._last_expert_outputs.mean(dim=[0, 1])  # (num_experts, D)
+
+        # Gram matrix: (num_experts, num_experts)
+        norms = mean_out.norm(dim=-1, keepdim=True)  # (num_experts, 1)
+        if (norms < 1e-8).any():
+            return torch.tensor(0.0, device=self.wte.weight.device)
+
+        normalized = mean_out / norms  # (num_experts, D)
+        gram = normalized @ normalized.T  # (num_experts, num_experts), cosine sim
+
+        # Eigenvalues
+        eigvals = torch.linalg.eigvalsh(gram)  # (num_experts,)
+        eigvals = torch.clamp(eigvals, min=1e-8)  # positive
+        total = eigvals.sum()
+        p = eigvals / total  # probability distribution
+
+        # Von Neumann entropy: -Σ p log p
+        entropy = -(p * p.log()).sum()
+        max_entropy = torch.log(torch.tensor(float(self.num_experts), device=eigvals.device))
+
+        # Return negative entropy (so optimizer minimizes = maximizes entropy)
+        # Normalize to [0, 1] range: 0 = max diversity, 1 = no diversity
+        return 1.0 - entropy / max_entropy

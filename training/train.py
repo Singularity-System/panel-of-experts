@@ -85,6 +85,8 @@ def train(model, dataloader, config, eval_dataloader=None):
 
     # Router load balancing loss (Switch Transformer style)
     lb_weight = getattr(config, "lb_loss_weight", 0.0)
+    # Expert diversity loss (von Neumann entropy)
+    div_weight = getattr(config, "div_loss_weight", 0.0)
 
     for epoch in range(1, config.num_epochs + 1):
         model.train()
@@ -103,6 +105,11 @@ def train(model, dataloader, config, eval_dataloader=None):
             if lb_weight > 0 and hasattr(model, "auxiliary_load_balance_loss"):
                 lb_loss = model.auxiliary_load_balance_loss()
                 loss = loss + lb_weight * lb_loss
+
+            # Apply diversity loss if enabled
+            if div_weight > 0 and hasattr(model, "expert_diversity_loss"):
+                div_loss = model.expert_diversity_loss()
+                loss = loss + div_weight * div_loss
 
             optimizer.zero_grad()
             loss.backward()
