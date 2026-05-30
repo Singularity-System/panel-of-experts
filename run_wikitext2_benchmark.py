@@ -33,11 +33,17 @@ from training.dataset import make_tokenizer
 # ============================================================
 
 def download_wikitext2(cache_dir="."):
-    """Download wikitext-2 from multiple fallback sources."""
-    cache_path = os.path.join(cache_dir, "wikitext-2", "wiki.train.tokens")
-    if os.path.exists(cache_path):
-        print(f"[Data] Wikitext-2 found at {cache_path}")
-        return cache_dir
+    """Download wikitext-2 from multiple fallback sources, or detect existing raw format."""
+    # Check for raw format (one sentence per line)
+    for ds in ["wikitext-103-raw", "wikitext-2-raw", "wikitext-2", "wikitext"]:
+        raw_path = os.path.join(cache_dir, ds, "wiki.train.raw")
+        if os.path.exists(raw_path):
+            print(f"[Data] Found raw format at {raw_path}")
+            return cache_dir
+        token_path = os.path.join(cache_dir, ds, "wiki.train.tokens")
+        if os.path.exists(token_path):
+            print(f"[Data] Found tokens format at {token_path}")
+            return cache_dir
 
     urls = [
         "https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-v10.zip",
@@ -51,9 +57,8 @@ def download_wikitext2(cache_dir="."):
             with urllib.request.urlopen(req, timeout=120) as resp:
                 raw = resp.read()
             with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-                # Find train file
                 for name in zf.namelist():
-                    if "wiki.train.tokens" in name:
+                    if "wiki.train.tokens" in name or "wiki.train.raw" in name:
                         zf.extract(name, cache_dir)
                         print(f"[Data] Extracted: {name}")
                         return cache_dir
@@ -64,14 +69,33 @@ def download_wikitext2(cache_dir="."):
     raise RuntimeError("All wikitext-2 download sources failed!")
 
 
-def load_wikitext2(cache_dir, num_samples=50000):
-    path = os.path.join(cache_dir, "wikitext-2", "wiki.train.tokens")
-    with open(path, "r") as f:
-        text = f.read()
-    lines = [s.strip() for s in text.split("\n") if len(s.strip()) > 20]
-    lines = lines[:num_samples]
-    print(f"[Data] Loaded {len(lines)} lines from wikitext-2")
-    return lines
+def load_wikitext(cache_dir, dataset="wikitext-2", num_samples=50000):
+    """Load wikitext dataset (supports raw and tokens formats)."""
+    # Try multiple locations
+    search_paths = [
+        os.path.join(cache_dir, f"wikitext-{dataset}-raw", "wiki.train.raw"),
+        os.path.join(cache_dir, f"wikitext-{dataset}", "wiki.train.raw"),
+        os.path.join(cache_dir, f"wikitext-{dataset}", "wiki.train.tokens"),
+        os.path.join(cache_dir, "wikitext-2-raw", "wiki.train.raw"),
+        os.path.join(cache_dir, "wikitext-2", "wiki.train.raw"),
+        os.path.join(cache_dir, "wikitext-2", "wiki.train.tokens"),
+    ]
+
+    for path in search_paths:
+        if os.path.exists(path):
+            print(f"[Data] Using: {path}")
+            if path.endswith(".raw"):
+                with open(path, "r") as f:
+                    lines = [s.strip() for s in f if len(s.strip()) > 20]
+            else:
+                with open(path, "r") as f:
+                    text = f.read()
+                lines = [s.strip() for s in text.split("\n") if len(s.strip()) > 20]
+            lines = lines[:num_samples]
+            print(f"[Data] Loaded {len(lines)} lines")
+            return lines
+
+    raise FileNotFoundError(f"Wikitext not found! Searched: {search_paths}")
 
 
 # ============================================================
@@ -264,6 +288,8 @@ def check_router_collapse(stats, num_experts):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", type=str, default="wikitext-2", choices=["wikitext-2", "wikitext-103"],
+                       help="Dataset to use")
     parser.add_argument("--samples", type=int, default=50000)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--d_model", type=int, default=128)
@@ -275,9 +301,9 @@ def main():
     if device.type == "cuda":
         print(f"GPU: {torch.cuda.get_device_name(0)}")
 
-    # Download & load data
+    # Load data
     cache_dir = download_wikitext2()
-    texts = load_wikitext2(cache_dir, args.samples)
+    texts = load_wikitext(cache_dir, args.dataset, args.samples)
 
     tokenizer = make_tokenizer(type("C", (), {"vocab_size": 50257})())
     class DS(torch.utils.data.Dataset):
