@@ -150,8 +150,9 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # Generate synthetic data
-    texts = generate_synthetic_data(50000)
+    # Generate synthetic data (default 5000 for quick testing)
+    num_samples = int(os.environ.get("NUM_SAMPLES", "5000"))
+    texts = generate_synthetic_data(num_samples)
     print(f"Synthetic data: {len(texts)} samples")
 
     tokenizer = make_tokenizer(type("C", (), {"vocab_size": 50257})())
