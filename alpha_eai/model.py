@@ -34,7 +34,8 @@ class PoEModel(nn.Module):
             n_head=config.n_head, d_ff=config.d_ff)
 
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
-        self.wte.weight = self.lm_head.weight
+        # Do NOT tie weights: post-processing output space differs from embedding space
+        # self.wte.weight = self.lm_head.weight
         self.apply(self._init_weights)
 
         # Zero expert and post-processing wpe AFTER _init_weights to avoid double position encoding
