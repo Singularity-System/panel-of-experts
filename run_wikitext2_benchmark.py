@@ -349,7 +349,7 @@ def main():
     print(f"Data: {len(tr)} train, {len(va)} val, {len(trl)} batches/train")
 
     d = args.d_model
-    cfg = PoEConfig(num_experts=4, expert_num_layers=3, post_processing_num_layers=2,
+    cfg = PoEConfig(num_experts=4, expert_num_layers=3, post_processing_num_layers=3,
                     d_model=d, n_head=4, d_ff=d*2, top_k=2, max_seq_len=256,
                     batch_size=16, num_epochs=args.epochs, learning_rate=3e-4,
                     lb_loss_weight=0.1, div_loss_weight=0.5)

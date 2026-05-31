@@ -114,12 +114,27 @@ class PoEModel(nn.Module):
         device_experts = {}
         for e in active_experts:
             dev = self.expert_devices[e]
-            self._fix_expert_device(e)  # re-assign if model.to() moved it
+            self._fix_expert_device(e)
             if dev not in device_experts:
                 device_experts[dev] = []
             device_experts[dev].append(e)
 
-        is_cuda = main_device.type == "cuda"
+        # Ensure at least one expert runs on each GPU (for better GPU utilization)
+        # If a GPU has no active experts, add the one with lowest routing weight
+        all_devices = set(self.expert_devices)
+        inactive_devices = all_devices - set(device_experts.keys())
+        for dev in inactive_devices:
+            # Find expert on this GPU with lowest weight
+            min_e = -1
+            min_w = float('inf')
+            for e in range(self.num_experts):
+                if self.expert_devices[e] == dev:
+                    w = token_expert_weight[:, :, e].sum().item()
+                    if w < min_w:
+                        min_w = w
+                        min_e = e
+            if min_e >= 0:
+                device_experts[dev] = [min_e]
 
         # Execute per device
         for dev, dev_expert_list in device_experts.items():
@@ -140,9 +155,22 @@ class PoEModel(nn.Module):
         weighted_flat = weighted_experts.reshape(B * S, E, D)  # (B*S, 4, D)
 
         # Cross-attention in expert dimension (Q=K=V from weighted experts)
-        attn_output, _ = self.fusion.expert_attention(
-            weighted_flat, weighted_flat, weighted_flat, need_weights=False
-        )  # (B*S, 4, D)
+        # Distribute across GPUs: half on each GPU
+        num_gpus = len(set(self.expert_devices))
+        if num_gpus > 1 and main_device.type == "cuda":
+            # Split in batch dimension
+            mid = (B * S) // 2
+            flat1 = weighted_flat[:mid].to(self.expert_devices[0])
+            flat2 = weighted_flat[mid:].to(self.expert_devices[1])
+            with torch.cuda.device(self.expert_devices[0]):
+                out1, _ = self.fusion.expert_attention(flat1, flat1, flat1, need_weights=False)
+            with torch.cuda.device(self.expert_devices[1]):
+                out2, _ = self.fusion.expert_attention(flat2, flat2, flat2, need_weights=False)
+            attn_output = torch.cat([out1.cpu(), out2.cpu()], dim=0).to(main_device)
+        else:
+            attn_output, _ = self.fusion.expert_attention(
+                weighted_flat, weighted_flat, weighted_flat, need_weights=False
+            )
 
         # Weighted mean after attention
         fused = attn_output.reshape(B, S, E, D)
