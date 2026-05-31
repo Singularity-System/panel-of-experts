@@ -4,3 +4,6 @@ __pycache__/
 output/
 *.pt
 .ipynb_checkpoints/
+wikitext-2-raw/
+wikitext-103-raw/
+checkpoints/

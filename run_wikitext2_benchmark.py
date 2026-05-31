@@ -155,7 +155,7 @@ class StandardTransformer(torch.nn.Module):
 # Training
 # ============================================================
 
-def train_model(model, trl, epochs, device, seed=0, lb_alpha=0.0, div_alpha=0.0):
+def train_model(model, trl, epochs, device, seed=0, lb_alpha=0.0, div_alpha=0.0, save_path=None):
     torch.manual_seed(seed)
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
@@ -177,6 +177,12 @@ def train_model(model, trl, epochs, device, seed=0, lb_alpha=0.0, div_alpha=0.0)
             optimizer.step()
             scheduler.step()
             total_loss += outputs["loss"].item()
+
+    # Save checkpoint
+    if save_path:
+        torch.save(model.state_dict(), save_path)
+        print(f"[Checkpoint] Saved to {save_path}")
+
     return model
 
 
@@ -350,8 +356,10 @@ def main():
 
         if mtype == "poe":
             model = PoEModel(cfg)
+            save_path = f"checkpoints/ppo-{name.replace('/', '_')}.pt"
+            os.makedirs("checkpoints", exist_ok=True)
             train_model(model, trl, args.epochs, device, args.seed,
-                       lb_alpha=kwargs["lb"], div_alpha=kwargs["div"])
+                       lb_alpha=kwargs["lb"], div_alpha=kwargs["div"], save_path=save_path)
             res = evaluate(model, val, device)
             stats = routing_stats(model, trl, device)
             collapse = check_router_collapse(stats, cfg.num_experts)
@@ -380,7 +388,9 @@ def main():
         else:
             nl = kwargs["nl"]
             model = StandardTransformer(vocab_size=50257, d_model=d, n_head=4, d_ff=d*2, num_layers=nl, max_seq_len=256)
-            train_model(model, trl, args.epochs, device, args.seed)
+            save_path = f"checkpoints/tf-{name.replace('/', '_')}.pt"
+            os.makedirs("checkpoints", exist_ok=True)
+            train_model(model, trl, args.epochs, device, args.seed, save_path=save_path)
             res = evaluate(model, val, device)
             tp = sum(p.numel() for p in model.parameters())
             embed_p = sum(p.numel() for n, p in model.named_parameters() if 'wte' in n or 'wpe' in n)
