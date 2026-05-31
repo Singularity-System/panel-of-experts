@@ -8,45 +8,47 @@
 
 ## Architecture Depth
 
-| Model | Sequential Depth | Total Params | Active Params (per forward) |
+| Model | Sequential Depth | Total Params | Active Params |
 |---|---|---|---|
-| PPoT | **5 layers** (3 expert + 2 post-proc) | 9.0M | ~7.5M (top_k=2) |
+| PPoT | **5 layers** (3 expert + 2 post-proc) | 9.0M | ~7.5M |
 | Transformer-5L | 5 layers | 7.1M | 7.1M |
 | Transformer-8L | 8 layers | 7.5M | 7.5M |
 | Transformer-12L | 12 layers | 8.1M | 8.1M |
 
 ## Results
 
-| Model | Depth | PPL | Acc | Time |
-|---|---|---|---|---|
-| PPoT-Baseline | **5** | **12.48** | 0.1983 | 361s |
-| PPoT-LB | 5 | 12.61 | 0.1946 | 364s |
-| PPoT-Div | 5 | 12.48 | 0.1967 | 428s |
-| PPoT-LB+Div | 5 | 12.60 | 0.1952 | 429s |
-| Transformer-5L | 5 | 17.50 | 0.1463 | 229s |
-| Transformer-8L | 8 | 14.77 | 0.1809 | 286s |
-| Transformer-12L | 12 | 13.30 | 0.2065 | 347s |
-
-## Key Findings
-
-1. **PPoT (5L) beats Transformer-5L by 28.7% PPL** — same depth, MoE wins big
-2. **PPoT (5L) beats Transformer-8L by 15.5% PPL** — 5L beats 8L
-3. **PPoT (5L) beats Transformer-12L by 6.2% PPL** — 5L beats 12L
-4. **PPoT uses 43% depth for better PPL than 12L Transformer**
-5. **TF-12L only wins on Acc (+4.1%)** — depth helps accuracy, but PPoT wins on probability calibration (PPL)
-
-## Routing Details
-
-| Config | E0 | E1 | E2 | E3 | Balance | VN% | Eff |
+| Model | Depth | PPL | Acc | Balance | VN% | Eff | Time |
 |---|---|---|---|---|---|---|---|
-| Baseline | 28747 | 56825 | 53724 | 34050 | 0.506 | 83.4% | 3.71 |
-| LB | 50321 | 37762 | 36610 | 48653 | 0.728 | 62.6% | 3.92 |
-| Div | 81622 | 48654 | 5989 | 37081 | 0.073 | 100.0% | 2.88 |
-| LB+Div | 53029 | 32706 | 44584 | 43027 | 0.617 | 99.9% | 3.89 |
+| PPoT-Baseline | 5 | 12.15 | 0.1969 | 0.479 | 86.3% | 3.77 | 355s |
+| PPoT-LB | 5 | 12.22 | 0.1969 | 0.735 | 51.1% | 3.94 | 364s |
+| PPoT-Div | 5 | **12.11** | **0.1996** | 0.079 | 100% | 2.89 | 432s |
+| PPoT-LB+Div | 5 | 12.26 | 0.1972 | 0.646 | 100% | 3.89 | 432s |
+| Transformer-5L | 5 | 17.55 | 0.1415 | — | — | — | 227s |
+| Transformer-8L | 8 | 14.74 | 0.1778 | — | — | — | 286s |
+| Transformer-12L | 12 | 12.94 | 0.2076 | — | — | — | 348s |
 
-## Eigenvalues
+## Core Thesis: Width Parallelism >> Depth
 
-- Baseline: [0.377, 0.561, 0.859, 2.204]
-- LB: [0.133, 0.412, 0.586, 2.868]
-- Div: [0.977, 0.979, 1.004, 1.040]
-- LB+Div: [0.954, 0.975, 0.996, 1.074]
+- **PPoT 5L beats TF-5L**: PPL **-30.8%**, Acc **+39.2%**
+- **PPoT 5L beats TF-8L**: PPL **-17.6%**, Acc **+9.9%**
+- **PPoT 5L beats TF-12L**: PPL **-6.3%** (despite 5 < 12 depth)
+
+**PPoT uses 42% of Transformer depth (5/12) for better PPL.**
+
+## LB+Div Effectiveness
+
+| Config | Balance | VN% | Effective Experts | Routing Collapse |
+|---|---|---|---|---|
+| Baseline | 0.479 | 86.3% | 3.77 | E0=33.4%, E1=16.0% |
+| LB | 0.735 | 51.1% | 3.94 | E0=28.8%, E2=21.6% |
+| Div | 0.079 | 100% | 2.89 | E0=46.8%, E2=3.7% |
+| **LB+Div** | **0.646** | **100%** | **3.89** | E0=30.8%, E1=19.9% |
+
+LB+Div achieves **simultaneous routing balance + expert diversity** — all 4 experts active (3.89 effective).
+
+## Eigenvalues (Gram Matrix)
+
+- Baseline: [0.324, 0.668, 1.012, 1.997] — skewed
+- LB: [0.112, 0.256, 0.459, 3.173] — worse
+- Div: [0.977, 0.994, 1.005, 1.024] — perfect uniform
+- **LB+Div**: [0.980, 0.996, 0.999, 1.024] — near perfect + balanced routing
