@@ -359,8 +359,8 @@ def main():
 
         if mtype == "poe":
             model = PoEModel(cfg)
-            save_path = f"checkpoints/ppo-{name.replace('/', '_')}.pt"
-            os.makedirs("checkpoints", exist_ok=True)
+            save_path = f"model_checkpoints/ppo-{name.replace('/', '_')}.pt"
+            os.makedirs("model_checkpoints", exist_ok=True)
             train_model(model, trl, args.epochs, device, args.seed,
                        lb_alpha=kwargs["lb"], div_alpha=kwargs["div"], save_path=save_path)
             res = evaluate(model, val, device)
@@ -391,8 +391,8 @@ def main():
         else:
             nl = kwargs["nl"]
             model = StandardTransformer(vocab_size=50257, d_model=d, n_head=4, d_ff=d*2, num_layers=nl, max_seq_len=256)
-            save_path = f"checkpoints/tf-{name.replace('/', '_')}.pt"
-            os.makedirs("checkpoints", exist_ok=True)
+            save_path = f"model_checkpoints/tf-{name.replace('/', '_')}.pt"
+            os.makedirs("model_checkpoints", exist_ok=True)
             train_model(model, trl, args.epochs, device, args.seed, save_path=save_path)
             res = evaluate(model, val, device)
             tp = sum(p.numel() for p in model.parameters())
