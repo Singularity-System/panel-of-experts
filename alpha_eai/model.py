@@ -134,10 +134,27 @@ class PoEModel(nn.Module):
         # Save expert outputs for diversity loss (keep gradient)
         self._last_expert_outputs = expert_outputs
 
-        # Direct weighted sum of active experts (no fusion layer to avoid signal dilution)
-        # weighted_experts has shape (B, S, 4, D) with 2 non-zero and 2 zero entries
-        # Summing over expert dimension gives: a*w1 + b*w2 (preserves full signal)
-        fused = weighted_experts.sum(dim=2)  # (B, S, D)
+        # Expert-dimension attention: let 4 experts interact before fusion
+        # weighted_experts: (B, S, 4, D) → reshape to (B*S, 4, D)
+        B, S, E, D = weighted_experts.shape
+        weighted_flat = weighted_experts.reshape(B * S, E, D)  # (B*S, 4, D)
+
+        # Cross-attention in expert dimension (Q=K=V from weighted experts)
+        attn_output, _ = self.fusion.expert_attention(
+            weighted_flat, weighted_flat, weighted_flat, need_weights=False
+        )  # (B*S, 4, D)
+
+        # Weighted mean after attention
+        fused = attn_output.reshape(B, S, E, D)
+        # Zero out unselected experts again (attention may have spread weights)
+        for k in range(self.top_k):
+            idx_k = router_indices[:, :, k]  # (B, S)
+            wt_k = router_weights[:, :, k]  # (B, S)
+            for e in range(E):
+                mask = (idx_k == e).float()
+                fused[:, :, e, :] = fused[:, :, e, :] * mask.unsqueeze(-1) * wt_k.unsqueeze(-1)
+
+        fused = fused.sum(dim=2)  # (B, S, D)
 
         # Post-processing
         pp_out = self.post_processing(fused, attention_mask)
