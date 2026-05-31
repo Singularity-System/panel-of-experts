@@ -33,10 +33,20 @@ from training.dataset import make_tokenizer
 # Data Loading
 # ============================================================
 
-def download_wikitext2(cache_dir="."):
-    """Download wikitext-2 from multiple fallback sources, or detect existing raw format."""
-    # Check for raw format (one sentence per line)
-    for ds in ["wikitext-103-raw", "wikitext-2-raw", "wikitext-2", "wikitext"]:
+def download_wikitext2(cache_dir=".", dataset="wikitext-103"):
+    """Download wikitext from multiple fallback sources, or detect existing raw format."""
+    # Check for specific dataset first, then fallback to any available
+    search_order = [dataset] if dataset else []
+    search_order += ["wikitext-103-raw", "wikitext-2-raw", "wikitext-103", "wikitext-2", "wikitext"]
+    # Deduplicate while preserving order
+    seen = set()
+    unique_order = []
+    for ds in search_order:
+        if ds not in seen:
+            seen.add(ds)
+            unique_order.append(ds)
+
+    for ds in unique_order:
         raw_path = os.path.join(cache_dir, ds, "wiki.train.raw")
         if os.path.exists(raw_path):
             print(f"[Data] Found raw format at {raw_path}")
@@ -72,31 +82,39 @@ def download_wikitext2(cache_dir="."):
 
 def load_wikitext(cache_dir, dataset="wikitext-2", num_samples=50000):
     """Load wikitext dataset (supports raw and tokens formats)."""
-    # Try multiple locations
-    search_paths = [
-        os.path.join(cache_dir, f"wikitext-{dataset}-raw", "wiki.train.raw"),
-        os.path.join(cache_dir, f"wikitext-{dataset}", "wiki.train.raw"),
-        os.path.join(cache_dir, f"wikitext-{dataset}", "wiki.train.tokens"),
-        os.path.join(cache_dir, "wikitext-2-raw", "wiki.train.raw"),
-        os.path.join(cache_dir, "wikitext-2", "wiki.train.raw"),
-        os.path.join(cache_dir, "wikitext-2", "wiki.train.tokens"),
-    ]
+    # Build search paths — try the dataset name as-is, then strip prefix
+    candidate_names = []
+    if dataset.startswith("wikitext-"):
+        candidate_names.append(dataset)
+        candidate_names.append("wikitext-" + dataset)
+    else:
+        candidate_names.append("wikitext-" + dataset)
+    candidate_names += ["wikitext-103-raw", "wikitext-2-raw", "wikitext-103", "wikitext-2"]
+    # Deduplicate
+    seen = set()
+    unique = []
+    for n in candidate_names:
+        if n not in seen:
+            seen.add(n)
+            unique.append(n)
 
-    for path in search_paths:
-        if os.path.exists(path):
-            print(f"[Data] Using: {path}")
-            if path.endswith(".raw"):
-                with open(path, "r") as f:
-                    lines = [s.strip() for s in f if len(s.strip()) > 20]
-            else:
-                with open(path, "r") as f:
-                    text = f.read()
-                lines = [s.strip() for s in text.split("\n") if len(s.strip()) > 20]
-            lines = lines[:num_samples]
-            print(f"[Data] Loaded {len(lines)} lines")
-            return lines
+    for name in unique:
+        for suffix in ["raw", "tokens"]:
+            path = os.path.join(cache_dir, name, f"wiki.train.{suffix}")
+            if os.path.exists(path):
+                print(f"[Data] Using: {path}")
+                if suffix == "raw":
+                    with open(path, "r") as f:
+                        lines = [s.strip() for s in f if len(s.strip()) > 20]
+                else:
+                    with open(path, "r") as f:
+                        text = f.read()
+                    lines = [s.strip() for s in text.split("\n") if len(s.strip()) > 20]
+                lines = lines[:num_samples]
+                print(f"[Data] Loaded {len(lines)} lines")
+                return lines
 
-    raise FileNotFoundError(f"Wikitext not found! Searched: {search_paths}")
+    raise FileNotFoundError(f"Wikitext dataset not found! Dataset: {dataset}")
 
 
 # ============================================================
@@ -313,7 +331,7 @@ def main():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
 
     # Load data
-    cache_dir = download_wikitext2()
+    cache_dir = download_wikitext2(dataset=args.dataset)
     texts = load_wikitext(cache_dir, args.dataset, args.samples)
 
     tokenizer = make_tokenizer(type("C", (), {"vocab_size": 50257})())
