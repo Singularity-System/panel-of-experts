@@ -133,7 +133,12 @@ class PoEModel(nn.Module):
         # Save expert outputs for diversity loss (keep gradient)
         self._last_expert_outputs = expert_outputs
 
-        fused = self.fusion(weighted_experts, attention_mask)
+        # Direct weighted sum of active experts (no fusion layer to avoid signal dilution)
+        # weighted_experts has shape (B, S, 4, D) with 2 non-zero and 2 zero entries
+        # Summing over expert dimension gives: a*w1 + b*w2 (preserves full signal)
+        fused = weighted_experts.sum(dim=2)  # (B, S, D)
+
+        # Post-processing
         pp_out = self.post_processing(fused, attention_mask)
         logits = self.lm_head(pp_out)
 
