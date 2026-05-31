@@ -23,6 +23,7 @@ import time
 from torch.utils.data import DataLoader, random_split
 from torch.nn import CrossEntropyLoss
 from transformers import GPT2Model, GPT2Config, get_linear_schedule_with_warmup
+from tqdm import tqdm
 from alpha_eai.config import PoEConfig
 from alpha_eai.model import PoEModel
 from training.dataset import make_tokenizer
@@ -164,7 +165,8 @@ def train_model(model, trl, epochs, device, seed=0, lb_alpha=0.0, div_alpha=0.0,
     for epoch in range(1, epochs + 1):
         model.train()
         total_loss = 0
-        for batch in trl:
+        pbar = tqdm(trl, desc=f"Epoch {epoch}/{epochs}")
+        for batch in pbar:
             outputs = model(input_ids=batch["input_ids"].to(device), attention_mask=batch["attention_mask"].to(device), labels=batch["labels"].to(device))
             loss = outputs["loss"]
             if lb_alpha > 0 and hasattr(model, "auxiliary_load_balance_loss"):
@@ -177,6 +179,7 @@ def train_model(model, trl, epochs, device, seed=0, lb_alpha=0.0, div_alpha=0.0,
             optimizer.step()
             scheduler.step()
             total_loss += outputs["loss"].item()
+            pbar.set_postfix({"loss": f"{outputs['loss'].item():.4f}"})
 
     # Save checkpoint
     if save_path:
@@ -190,7 +193,7 @@ def evaluate(model, dataloader, device):
     model.eval()
     total_loss, total_correct, total_tokens = 0, 0, 0
     with torch.no_grad():
-        for batch in dataloader:
+        for batch in tqdm(dataloader, desc="Eval"):
             outputs = model(input_ids=batch["input_ids"].to(device), attention_mask=batch["attention_mask"].to(device), labels=batch["labels"].to(device))
             total_loss += outputs["loss"].item()
             logits = outputs["logits"]
