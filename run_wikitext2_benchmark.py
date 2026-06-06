@@ -80,7 +80,7 @@ def download_wikitext2(cache_dir=".", dataset="wikitext-103"):
     raise RuntimeError("All wikitext-2 download sources failed!")
 
 
-def load_wikitext(cache_dir, dataset="wikitext-2", num_samples=50000):
+def load_wikitext(cache_dir, dataset="wikitext-2", num_samples=None):
     """Load wikitext dataset (supports raw and tokens formats)."""
     # Build search paths — try the dataset name as-is, then strip prefix
     candidate_names = []
@@ -110,7 +110,7 @@ def load_wikitext(cache_dir, dataset="wikitext-2", num_samples=50000):
                     with open(path, "r") as f:
                         text = f.read()
                     lines = [s.strip() for s in text.split("\n") if len(s.strip()) > 20]
-                lines = lines[:num_samples]
+                lines = lines[:num_samples] if num_samples else lines
                 print(f"[Data] Loaded {len(lines)} lines")
                 return lines
 
@@ -319,7 +319,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="wikitext-2", choices=["wikitext-2", "wikitext-103"],
                        help="Dataset to use")
-    parser.add_argument("--samples", type=int, default=50000)
+    parser.add_argument("--samples", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--d_model", type=int, default=128)
     parser.add_argument("--seed", type=int, default=42)
