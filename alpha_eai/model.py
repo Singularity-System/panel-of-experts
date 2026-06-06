@@ -151,19 +151,13 @@ class PoEModel(nn.Module):
         #   Concat → 2D per token
         # This preserves ALL expert information instead of weighted sum bottleneck
 
-        # Explicit per-token selection and concatenation
-        # Initialize: (B, S, top_k, D)
-        selected_experts = torch.zeros(B, S, self.top_k, D, device=main_device, dtype=x.dtype)
-        for b in range(B):
-            for s in range(S):
-                # Look up which 2 experts were selected for this token
-                selected_idx = router_indices[b, s]  # (top_k,)
-                for k in range(self.top_k):
-                    e = selected_idx[k].item()
-                    selected_experts[b, s, k, :] = expert_outputs[b, s, e, :]
-
-        # Concat along expert dimension → (B, S, 2D)
-        concatenated = selected_experts.reshape(B, S, self.top_k * D)
+        # Vectorized gather: (B, S, E, D) + (B, S, top_k) → (B, S, top_k, D)
+        # This keeps everything on GPU — no Python loop, full parallelism
+        expert_gather = torch.gather(
+            expert_outputs, 2,  # gather along expert dimension
+            router_indices.unsqueeze(-1).expand(-1, -1, -1, D).long()
+        )  # (B, S, top_k, D) — for each token, the 2 selected expert outputs
+        concatenated = expert_gather.reshape(B, S, self.top_k * D)  # (B, S, 2D)
 
         # Cross-attention → LayerNorm → Linear(2D→D)
         fused = self.fusion(concatenated)  # (B, S, D)
