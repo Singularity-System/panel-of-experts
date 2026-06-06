@@ -358,14 +358,13 @@ def main():
     # Experiment Configs
     # ============================================================
     configs = [
-        ("Transformer-5L", "tf", {"nl": 5}),
-        ("Transformer-8L", "tf", {"nl": 8}),
-        ("Transformer-12L", "tf", {"nl": 12}),
-        ("PPoT-LB+Div", "poe", {"lb": 0.1, "div": 0.5}),
+        ("Transformer", "tf"),
+        ("PPoT", "poe"),
     ]
 
     results = []
-    for name, mtype, kwargs in configs:
+    for item in configs:
+        name, mtype = item[0], item[1]
         print(f"\n{'='*70}")
         print(f"  {name}")
         print(f"{'='*70}")
@@ -373,10 +372,10 @@ def main():
 
         if mtype == "poe":
             model = PoEModel(cfg)
-            save_path = f"model_checkpoints/ppo-{name.replace('/', '_')}.pt"
+            save_path = f"model_checkpoints/{name.lower()}.pt"
             os.makedirs("model_checkpoints", exist_ok=True)
             train_model(model, trl, args.epochs, device, args.seed,
-                       lb_alpha=kwargs["lb"], div_alpha=kwargs["div"], save_path=save_path)
+                       lb_alpha=0.1, div_alpha=0.5, save_path=save_path)
             res = evaluate(model, val, device)
             stats = routing_stats(model, trl, device)
             collapse = check_router_collapse(stats, cfg.num_experts)
@@ -403,9 +402,8 @@ def main():
                 "time": time.time() - t0,
             })
         else:
-            nl = kwargs["nl"]
-            model = StandardTransformer(vocab_size=50257, d_model=d, n_head=4, d_ff=d*2, num_layers=nl, max_seq_len=256)
-            save_path = f"model_checkpoints/tf-{name.replace('/', '_')}.pt"
+            model = StandardTransformer(vocab_size=50257, d_model=d, n_head=4, d_ff=d*2, num_layers=6, max_seq_len=256)
+            save_path = f"model_checkpoints/{name.lower()}.pt"
             os.makedirs("model_checkpoints", exist_ok=True)
             train_model(model, trl, args.epochs, device, args.seed, save_path=save_path)
             res = evaluate(model, val, device)
