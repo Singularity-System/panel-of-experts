@@ -1,19 +1,19 @@
 """
-Load saved checkpoints and evaluate PPoT vs Transformer.
-Simple test script for paper writing.
+Load saved checkpoints and evaluate PPoT vs Transformer on wikitext-103.
 
 Usage:
     python3 test_checkpoints.py
 """
-import torch
+import argparse
+import os
 import math
+import torch
 from torch.utils.data import DataLoader
 from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
 from alpha_eai.config import PoEConfig
 from alpha_eai.model import PoEModel
 from training.dataset import make_tokenizer
-import os
 
 
 class StandardTransformer(torch.nn.Module):
@@ -79,15 +79,28 @@ def evaluate(model, dataloader, device):
     return {"loss": avg, "ppl": math.exp(avg), "acc": total_correct / max(total_tokens, 1)}
 
 
+def count_layers(state_dict):
+    """Detect number of transformer layers from state_dict keys."""
+    max_layer = 0
+    for k in state_dict.keys():
+        if "layers." in k:
+            layer_idx = int(k.split("layers.")[1].split(".")[0])
+            max_layer = max(max_layer, layer_idx)
+    return max_layer + 1
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", type=str, default="wikitext-103")
+    parser.add_argument("--samples", type=int, default=50000)
+    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # Load wikitext data
+    # Load data
     cache_dir = "."
-    dataset = "wikitext-103"
-    # Search for wikitext-103-raw
-    search_order = ["wikitext-103-raw", "wikitext-2-raw", "wikitext-103", "wikitext-2"]
+    search_order = [f"{args.dataset}-raw", args.dataset]
     data_path = None
     for name in search_order:
         path = os.path.join(cache_dir, name, "wiki.train.raw")
@@ -96,11 +109,11 @@ def main():
             break
 
     if not data_path:
-        print("[Error] Wikitext data not found!")
+        print(f"[Error] Wikitext data not found!")
         return
 
     with open(data_path, "r") as f:
-        lines = [s.strip() for s in f if len(s.strip()) > 20][:50000]
+        lines = [s.strip() for s in f if len(s.strip()) > 20][:args.samples]
     print(f"[Data] Loaded {len(lines)} lines from {data_path}")
 
     tokenizer = make_tokenizer(type("C", (), {"vocab_size": 50257})())
@@ -118,20 +131,24 @@ def main():
     print(f"Data: {len(tr)} train, {len(va)} val")
 
     # ============================================================
-    # Load Transformer
+    # Load and evaluate Transformer
     # ============================================================
     print(f"\n{'='*70}")
-    print(f"  Transformer-5L")
+    print(f"  Transformer")
     print(f"{'='*70}")
 
-    tf_model = StandardTransformer(vocab_size=50257, d_model=128, n_head=4, d_ff=256, num_layers=5, max_seq_len=256)
     tf_ckpt = "model_checkpoints/transformer.pt"
-    if os.path.exists(tf_ckpt):
-        tf_model.load_state_dict(torch.load(tf_ckpt, map_location=device))
-        print(f"[OK] Loaded {tf_ckpt}")
-    else:
+    if not os.path.exists(tf_ckpt):
         print(f"[Error] Not found: {tf_ckpt}")
         return
+
+    tf_state = torch.load(tf_ckpt, map_location=device)
+    tf_nl = count_layers(tf_state)
+    print(f"[Info] Detected {tf_nl} layers from checkpoint")
+
+    tf_model = StandardTransformer(vocab_size=50257, d_model=128, n_head=4, d_ff=256, num_layers=tf_nl, max_seq_len=256)
+    tf_model.load_state_dict(tf_state)
+    print(f"[OK] Loaded {tf_ckpt}")
 
     tf_model.to(device)
     res_tf = evaluate(tf_model, val, device)
@@ -139,11 +156,16 @@ def main():
     print(f"PPL={res_tf['ppl']:.2f}, Acc={res_tf['acc']:.4f}, Params={tp_tf:,}")
 
     # ============================================================
-    # Load PPoT
+    # Load and evaluate PPoT
     # ============================================================
     print(f"\n{'='*70}")
     print(f"  PPoT")
     print(f"{'='*70}")
+
+    ppo_ckpt = "model_checkpoints/ppot.pt"
+    if not os.path.exists(ppo_ckpt):
+        print(f"[Error] Not found: {ppo_ckpt}")
+        return
 
     cfg = PoEConfig(num_experts=4, expert_num_layers=3, post_processing_num_layers=3,
                     d_model=128, n_head=4, d_ff=256, top_k=2, max_seq_len=256,
@@ -151,13 +173,8 @@ def main():
                     lb_loss_weight=0.1, div_loss_weight=0.5, num_gpus=2)
 
     ppo_model = PoEModel(cfg)
-    ppo_ckpt = "model_checkpoints/ppot.pt"
-    if os.path.exists(ppo_ckpt):
-        ppo_model.load_state_dict(torch.load(ppo_ckpt, map_location=device))
-        print(f"[OK] Loaded {ppo_ckpt}")
-    else:
-        print(f"[Error] Not found: {ppo_ckpt}")
-        return
+    ppo_model.load_state_dict(torch.load(ppo_ckpt, map_location=device))
+    print(f"[OK] Loaded {ppo_ckpt}")
 
     ppo_model.to(device)
     res_ppo = evaluate(ppo_model, val, device)
@@ -172,12 +189,12 @@ def main():
     print(f"{'='*70}")
     print(f"{'Model':<20} {'PPL':>8} {'Acc':>8} {'Params':>10}")
     print("-"*70)
-    print(f"{'Transformer-5L':<20} {res_tf['ppl']:>8.2f} {res_tf['acc']:>8.4f} {tp_tf:>10,}")
+    print(f"{'Transformer':<20} {res_tf['ppl']:>8.2f} {res_tf['acc']:>8.4f} {tp_tf:>10,}")
     print(f"{'PPoT':<20} {res_ppo['ppl']:>8.2f} {res_ppo['acc']:>8.4f} {tp_ppo:>10,}")
 
     ppl_improve = (res_tf["ppl"] - res_ppo["ppl"]) / res_tf["ppl"] * 100
     acc_improve = (res_ppo["acc"] - res_tf["acc"]) / res_tf["acc"] * 100
-    print(f"\nPPoT vs Transformer-5L:")
+    print(f"\nPPoT vs Transformer:")
     print(f"  PPL improvement: {ppl_improve:+.1f}%")
     print(f"  Acc improvement: {acc_improve:+.1f}%")
 
