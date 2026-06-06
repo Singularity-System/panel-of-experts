@@ -1,36 +1,35 @@
+import copy
 import torch
 import torch.nn as nn
-from transformers import GPT2Model, GPT2Config
 from typing import Optional
 
 
 class Expert(nn.Module):
-    """Expert: GPT2 transformer blocks that accepts input_embeds directly.
-    Position encoding is disabled to avoid duplication with PoEModel's wpe."""
+    """Expert: Transformer encoder layers.
 
-    def __init__(self, num_layers: int = 5, d_model: int = 256, n_head: int = 4, d_ff: int = 512):
+    Each expert processes the FULL sequence (no masking).
+    Token-level routing happens at fusion time: only routed experts contribute.
+
+    This is mathematically sound because:
+    1. Expert self-attention processes all tokens normally → clean gradients
+    2. Fusion zeros out unrouted expert outputs per token → no contamination
+    3. Training/inference routing is consistent: both based on token embeddings
+    """
+
+    def __init__(self, num_layers: int = 3, d_model: int = 256, n_head: int = 4, d_ff: int = 512):
         super().__init__()
-        hf_config = GPT2Config(
-            vocab_size=1,
-            n_layer=num_layers,
-            n_embd=d_model,
-            n_head=n_head,
-            n_inner=d_ff,
-            use_cache=False,
-            bos_token_id=None,
-            eos_token_id=None,
-        )
-        self.transformer = GPT2Model(hf_config)
-        # Zero position embedding so it doesn't double-encode with PoEModel's wpe
-        self.transformer.wpe.weight.data.zero_()
-        self.d_model = self.transformer.config.n_embd
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=n_head, dim_feedforward=d_ff,
+            batch_first=True, activation='gelu', norm_first=False)
+        self.layers = nn.ModuleList([copy.deepcopy(encoder_layer) for _ in range(num_layers)])
+        self.norm = nn.LayerNorm(d_model)
+        self.d_model = d_model
 
     def forward(self, input_embeds: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if attention_mask is None:
-            attention_mask = torch.ones(input_embeds.shape[:2], device=input_embeds.device, dtype=torch.long)
-        outputs = self.transformer(
-            inputs_embeds=input_embeds,
-            attention_mask=attention_mask,
-            return_dict=True,
-        )
-        return outputs.last_hidden_state
+        output = input_embeds
+        key_padding_mask = None
+        if attention_mask is not None:
+            key_padding_mask = ~(attention_mask.bool())
+        for layer in self.layers:
+            output = layer(output, src_key_padding_mask=key_padding_mask)
+        return self.norm(output)

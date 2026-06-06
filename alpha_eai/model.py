@@ -38,9 +38,7 @@ class PoEModel(nn.Module):
         # self.wte.weight = self.lm_head.weight
         self.apply(self._init_weights)
 
-        # Zero expert and post-processing wpe AFTER _init_weights to avoid double position encoding
-        for expert in self.experts:
-            expert.transformer.wpe.weight.data.zero_()
+        # Zero post-processing wpe AFTER _init_weights to avoid double position encoding
         self.post_processing.transformer.wpe.weight.data.zero_()
 
         # === Multi-GPU expert distribution ===
@@ -136,11 +134,11 @@ class PoEModel(nn.Module):
             if min_e >= 0:
                 device_experts[dev] = [min_e]
 
-        # Execute per device
+        # Execute per device — experts process full sequence, fusion selects routed experts
         for dev, dev_expert_list in device_experts.items():
             for e in dev_expert_list:
                 expert_input = x.to(dev)
-                out = self.experts[e](expert_input, attention_mask.to(dev))
+                out = self.experts[e](expert_input)
                 expert_outputs[:, :, e, :] = out.to(main_device)
 
         # Apply per-token weights: zero out unselected expert contributions
@@ -154,6 +152,11 @@ class PoEModel(nn.Module):
         B, S, E, D = weighted_experts.shape
         weighted_flat = weighted_experts.reshape(B * S, E, D)  # (B*S, 4, D)
 
+        # Build key_padding_mask: mask out expert slots that are all-zero
+        # This prevents zero-vectors from diluting gradient in softmax
+        expert_norms = weighted_flat.norm(dim=-1)  # (B*S, E)
+        key_padding_mask = (expert_norms == 0)  # (B*S, E), True = mask
+
         # Cross-attention in expert dimension (Q=K=V from weighted experts)
         # Distribute across GPUs: half on each GPU
         num_gpus = len(set(self.expert_devices))
@@ -162,14 +165,19 @@ class PoEModel(nn.Module):
             mid = (B * S) // 2
             flat1 = weighted_flat[:mid].to(self.expert_devices[0])
             flat2 = weighted_flat[mid:].to(self.expert_devices[1])
+            mask1 = key_padding_mask[:mid].to(self.expert_devices[0])
+            mask2 = key_padding_mask[mid:].to(self.expert_devices[1])
             with torch.cuda.device(self.expert_devices[0]):
-                out1, _ = self.fusion.expert_attention(flat1, flat1, flat1, need_weights=False)
+                out1, _ = self.fusion.expert_attention(flat1, flat1, flat1,
+                    key_padding_mask=mask1, need_weights=False)
             with torch.cuda.device(self.expert_devices[1]):
-                out2, _ = self.fusion.expert_attention(flat2, flat2, flat2, need_weights=False)
+                out2, _ = self.fusion.expert_attention(flat2, flat2, flat2,
+                    key_padding_mask=mask2, need_weights=False)
             attn_output = torch.cat([out1.cpu(), out2.cpu()], dim=0).to(main_device)
         else:
             attn_output, _ = self.fusion.expert_attention(
-                weighted_flat, weighted_flat, weighted_flat, need_weights=False
+                weighted_flat, weighted_flat, weighted_flat,
+                key_padding_mask=key_padding_mask, need_weights=False
             )
 
         # Weighted mean after attention
@@ -183,6 +191,7 @@ class PoEModel(nn.Module):
                 fused[:, :, e, :] = fused[:, :, e, :] * mask.unsqueeze(-1) * wt_k.unsqueeze(-1)
 
         fused = fused.sum(dim=2)  # (B, S, D)
+        fused = self.fusion.ln(fused)  # LayerNorm: stabilize signal after fusion
 
         # Post-processing
         pp_out = self.post_processing(fused, attention_mask)
