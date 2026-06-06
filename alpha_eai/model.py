@@ -158,8 +158,8 @@ class PoEModel(nn.Module):
         )  # (B, S, top_k, D)
         concatenated = expert_gather.reshape(B, S, self.top_k * D)  # (B, S, 2D)
 
-        # Project 2D → D: Linear + LayerNorm
-        fused = self.fusion.project(concatenated)  # (B, S, D)
+        # Project 2D → D: Cross-attention → LayerNorm → Linear
+        fused = self.fusion(concatenated)  # (B, S, D)
 
         # Post-processing
         pp_out = self.post_processing(fused, attention_mask)
