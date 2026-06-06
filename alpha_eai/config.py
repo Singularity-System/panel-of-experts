@@ -4,8 +4,8 @@ from dataclasses import dataclass
 @dataclass
 class PoEConfig:
     num_experts: int = 4
-    expert_num_layers: int = 5
-    post_processing_num_layers: int = 6
+    expert_num_layers: int = 2
+    post_processing_num_layers: int = 4
     d_model: int = 256
     n_head: int = 4
     d_ff: int = 512
