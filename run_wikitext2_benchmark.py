@@ -335,8 +335,7 @@ def check_router_collapse(stats, num_experts):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=str, default="wikitext-103",
-                       choices=["wikitext-2", "wikitext-103", "pile-bookcorpus2", "pile-openwebtext2"],
-                       help="Dataset to use")
+                       help="Dataset to use: wikitext-2, wikitext-103, pile-bookcorpus2, pile-openwebtext2")
     parser.add_argument("--samples", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--d_model", type=int, default=128)
