@@ -7,16 +7,13 @@ from typing import Optional
 class ExpertFusion(nn.Module):
     def __init__(self, num_experts: int, d_model: int, n_head: int = 4):
         super().__init__()
-        self.expert_attention = nn.MultiheadAttention(embed_dim=d_model, num_heads=n_head, batch_first=True)
-        self.ln = nn.LayerNorm(d_model)
-
-    def forward(self, expert_outputs: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        B, S, N, D = expert_outputs.shape
-        expert_outputs_2d = expert_outputs.reshape(B * S, N, D)
-        attn_output, _ = self.expert_attention(expert_outputs_2d, expert_outputs_2d, expert_outputs_2d, need_weights=False)
-        fused = attn_output.mean(dim=1)
-        fused = self.ln(fused)
-        return fused.reshape(B, S, D)
+        # Project concatenated expert outputs (top_k * D → D) + LayerNorm
+        # top_k=2, so input is 2D → Linear → D → LayerNorm
+        self.project = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.GELU(),
+            nn.LayerNorm(d_model)
+        )
 
 
 class PostProcessing(nn.Module):

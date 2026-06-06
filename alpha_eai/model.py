@@ -141,57 +141,25 @@ class PoEModel(nn.Module):
                 out = self.experts[e](expert_input)
                 expert_outputs[:, :, e, :] = out.to(main_device)
 
-        # Apply per-token weights: zero out unselected expert contributions
-        weighted_experts = expert_outputs * token_expert_weight.unsqueeze(-1)
-
+        # === Fusion: concat selected expert outputs per token → 2D ===
         # Save expert outputs for diversity loss (keep gradient)
         self._last_expert_outputs = expert_outputs
 
-        # Expert-dimension attention: let 4 experts interact before fusion
-        # weighted_experts: (B, S, 4, D) → reshape to (B*S, 4, D)
-        B, S, E, D = weighted_experts.shape
-        weighted_flat = weighted_experts.reshape(B * S, E, D)  # (B*S, 4, D)
+        # For each token, take the 2 routed expert outputs and concatenate → 2D
+        # Then project 2D → D via Linear + LayerNorm
+        # This preserves ALL expert information instead of weighted sum bottleneck
 
-        # Build key_padding_mask: mask out expert slots that are all-zero
-        # This prevents zero-vectors from diluting gradient in softmax
-        expert_norms = weighted_flat.norm(dim=-1)  # (B*S, E)
-        key_padding_mask = (expert_norms == 0)  # (B*S, E), True = mask
+        # expert_outputs: (B, S, E, D)
+        # router_indices: (B, S, top_k) — for each token, which 2 experts were selected
+        # Gather expert outputs per token: (B, S, top_k, D)
+        expert_gather = torch.gather(
+            expert_outputs, 2,  # gather along expert dim
+            router_indices.unsqueeze(-1).expand(-1, -1, -1, D).long()
+        )  # (B, S, top_k, D)
+        concatenated = expert_gather.reshape(B, S, self.top_k * D)  # (B, S, 2D)
 
-        # Cross-attention in expert dimension (Q=K=V from weighted experts)
-        # Distribute across GPUs: half on each GPU
-        num_gpus = len(set(self.expert_devices))
-        if num_gpus > 1 and main_device.type == "cuda":
-            # Split in batch dimension
-            mid = (B * S) // 2
-            flat1 = weighted_flat[:mid].to(self.expert_devices[0])
-            flat2 = weighted_flat[mid:].to(self.expert_devices[1])
-            mask1 = key_padding_mask[:mid].to(self.expert_devices[0])
-            mask2 = key_padding_mask[mid:].to(self.expert_devices[1])
-            with torch.cuda.device(self.expert_devices[0]):
-                out1, _ = self.fusion.expert_attention(flat1, flat1, flat1,
-                    key_padding_mask=mask1, need_weights=False)
-            with torch.cuda.device(self.expert_devices[1]):
-                out2, _ = self.fusion.expert_attention(flat2, flat2, flat2,
-                    key_padding_mask=mask2, need_weights=False)
-            attn_output = torch.cat([out1.cpu(), out2.cpu()], dim=0).to(main_device)
-        else:
-            attn_output, _ = self.fusion.expert_attention(
-                weighted_flat, weighted_flat, weighted_flat,
-                key_padding_mask=key_padding_mask, need_weights=False
-            )
-
-        # Weighted mean after attention
-        fused = attn_output.reshape(B, S, E, D)
-        # Zero out unselected experts again (attention may have spread weights)
-        for k in range(self.top_k):
-            idx_k = router_indices[:, :, k]  # (B, S)
-            wt_k = router_weights[:, :, k]  # (B, S)
-            for e in range(E):
-                mask = (idx_k == e).float()
-                fused[:, :, e, :] = fused[:, :, e, :] * mask.unsqueeze(-1) * wt_k.unsqueeze(-1)
-
-        fused = fused.sum(dim=2)  # (B, S, D)
-        fused = self.fusion.ln(fused)  # LayerNorm: stabilize signal after fusion
+        # Project 2D → D: Linear + LayerNorm
+        fused = self.fusion.project(concatenated)  # (B, S, D)
 
         # Post-processing
         pp_out = self.post_processing(fused, attention_mask)
