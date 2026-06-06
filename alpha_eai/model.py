@@ -170,7 +170,14 @@ class PoEModel(nn.Module):
         if labels is not None:
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-            loss = nn.functional.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            # Mask out padding tokens from loss calculation
+            shift_mask = attention_mask[..., 1:].contiguous()  # (B, S-1)
+            # Expand mask to match logits shape
+            mask_expanded = shift_mask.view(-1)  # (B*(S-1),)
+            loss = nn.functional.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1))[mask_expanded.bool()],
+                shift_labels.view(-1)[mask_expanded.bool()]
+            )
 
         return {"loss": loss, "logits": logits}
 
