@@ -435,12 +435,12 @@ def main():
     # ============================================================
     # Comparisons vs Baseline
     # ============================================================
-    baseline = [r for r in results if r["name"] == "PPoT-LB+Div"][0]
+    baseline = [r for r in results if r["type"] == "PPoT"][0]
     print(f"\n{'='*70}")
-    print(f"  VS PPoT-Baseline")
+    print(f"  VS PPoT")
     print(f"{'='*70}")
     for r in results:
-        if r["name"] == "PPoT-Baseline": continue
+        if r["type"] == "PPoT": continue
         ppl_d = (r["ppl"] - baseline["ppl"]) / baseline["ppl"] * 100
         acc_d = (r["acc"] - baseline["acc"]) / max(baseline["acc"], 1e-8) * 100
         print(f"{r['name']}: PPL {ppl_d:+.1f}%, Acc {acc_d:+.1f}%")
