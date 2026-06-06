@@ -13,21 +13,16 @@ class ExpertFusion(nn.Module):
         self.expert_cross_attn = nn.MultiheadAttention(
             embed_dim=concat_d, num_heads=max(n_head, 4), batch_first=True)
         self.ln = nn.LayerNorm(concat_d)
-        self.project = nn.Sequential(
-            nn.Linear(concat_d, d_model),
-            nn.GELU(),
-            nn.LayerNorm(d_model)
-        )
+        self.project = nn.Linear(concat_d, d_model)
 
     def forward(self, concatenated: torch.Tensor) -> torch.Tensor:
         """
         concatenated: (B, S, 2D) — concat of top-k expert outputs per token
         Returns: (B, S, D)
         """
-        # Cross-attention: let the two expert representations interact
         attn_out, _ = self.expert_cross_attn(concatenated, concatenated, concatenated)
-        fused = self.ln(attn_out + concatenated)  # residual
-        return self.project(fused)
+        fused = self.ln(attn_out + concatenated)  # residual + layernorm on 2D
+        return self.project(fused)  # Linear(2D→D)
 
 
 class PostProcessing(nn.Module):

@@ -141,24 +141,31 @@ class PoEModel(nn.Module):
                 out = self.experts[e](expert_input)
                 expert_outputs[:, :, e, :] = out.to(main_device)
 
-        # === Fusion: concat selected expert outputs per token → 2D ===
+        # === Fusion: per-token routing → concat selected experts → 2D ===
         # Save expert outputs for diversity loss (keep gradient)
         self._last_expert_outputs = expert_outputs
 
-        # For each token, take the 2 routed expert outputs and concatenate → 2D
-        # Then project 2D → D via Linear + LayerNorm
+        # For each token (b, s):
+        #   router_indices[b, s] = [e_a, e_b]  — which 2 experts were selected
+        #   Take expert_outputs[b, s, e_a] and expert_outputs[b, s, e_b]
+        #   Concat → 2D per token
         # This preserves ALL expert information instead of weighted sum bottleneck
 
-        # expert_outputs: (B, S, E, D)
-        # router_indices: (B, S, top_k) — for each token, which 2 experts were selected
-        # Gather expert outputs per token: (B, S, top_k, D)
-        expert_gather = torch.gather(
-            expert_outputs, 2,  # gather along expert dim
-            router_indices.unsqueeze(-1).expand(-1, -1, -1, D).long()
-        )  # (B, S, top_k, D)
-        concatenated = expert_gather.reshape(B, S, self.top_k * D)  # (B, S, 2D)
+        # Explicit per-token selection and concatenation
+        # Initialize: (B, S, top_k, D)
+        selected_experts = torch.zeros(B, S, self.top_k, D, device=main_device, dtype=x.dtype)
+        for b in range(B):
+            for s in range(S):
+                # Look up which 2 experts were selected for this token
+                selected_idx = router_indices[b, s]  # (top_k,)
+                for k in range(self.top_k):
+                    e = selected_idx[k].item()
+                    selected_experts[b, s, k, :] = expert_outputs[b, s, e, :]
 
-        # Project 2D → D: Cross-attention → LayerNorm → Linear
+        # Concat along expert dimension → (B, S, 2D)
+        concatenated = selected_experts.reshape(B, S, self.top_k * D)
+
+        # Cross-attention → LayerNorm → Linear(2D→D)
         fused = self.fusion(concatenated)  # (B, S, D)
 
         # Post-processing
