@@ -81,8 +81,10 @@ def download_wikitext2(cache_dir=".", dataset="wikitext-103"):
 
 
 def load_wikitext(cache_dir, dataset="wikitext-2", num_samples=None):
-    """Load wikitext dataset (supports raw and tokens formats)."""
-    # Build search paths — try the dataset name as-is, then strip prefix
+    """Load dataset (supports raw, tokens, and pile formats)."""
+    lines = None
+
+    # Try wikitext datasets
     candidate_names = []
     if dataset.startswith("wikitext-"):
         candidate_names.append(dataset)
@@ -90,13 +92,8 @@ def load_wikitext(cache_dir, dataset="wikitext-2", num_samples=None):
     else:
         candidate_names.append("wikitext-" + dataset)
     candidate_names += ["wikitext-103-raw", "wikitext-2-raw", "wikitext-103", "wikitext-2"]
-    # Deduplicate
     seen = set()
-    unique = []
-    for n in candidate_names:
-        if n not in seen:
-            seen.add(n)
-            unique.append(n)
+    unique = [n for n in candidate_names if not (n in seen or seen.add(n))]
 
     for name in unique:
         for suffix in ["raw", "tokens"]:
@@ -112,21 +109,29 @@ def load_wikitext(cache_dir, dataset="wikitext-2", num_samples=None):
                     lines = [s.strip() for s in text.split("\n") if len(s.strip()) > 20]
                 lines = lines[:num_samples] if num_samples else lines
                 print(f"[Data] Loaded {len(lines)} lines")
-                return lines
+                return lines, None  # No separate val
 
-    # Also try pile datasets
+    # Try pile datasets (train.txt + val.txt)
     pile_names = ["pile-bookcorpus2", "pile-openwebtext2", "pile-bookcorpus", "pile-openwebtext"]
     for name in pile_names:
-        path = os.path.join(cache_dir, name, "train.txt")
-        if os.path.exists(path):
-            print(f"[Data] Using: {path}")
-            with open(path, "r") as f:
-                lines = [s.strip() for s in f if len(s.strip()) > 20]
-            lines = lines[:num_samples] if num_samples else lines
-            print(f"[Data] Loaded {len(lines)} lines")
-            return lines
+        train_path = os.path.join(cache_dir, name, "train.txt")
+        val_path = os.path.join(cache_dir, name, "val.txt")
+        if os.path.exists(train_path):
+            print(f"[Data] Using: {train_path}")
+            with open(train_path, "r") as f:
+                train_lines = [s.strip() for s in f if len(s.strip()) > 20]
+            train_lines = train_lines[:num_samples] if num_samples else train_lines
+            print(f"[Data] Loaded {len(train_lines)} train lines")
 
-    raise FileNotFoundError(f"Wikitext dataset not found! Dataset: {dataset}")
+            val_lines = None
+            if os.path.exists(val_path):
+                with open(val_path, "r") as f:
+                    val_lines = [s.strip() for s in f if len(s.strip()) > 20]
+                print(f"[Data] Loaded {len(val_lines)} val lines")
+
+            return train_lines, val_lines
+
+    raise FileNotFoundError(f"Dataset not found! Dataset: {dataset}")
 
 
 # ============================================================
@@ -329,7 +334,8 @@ def check_router_collapse(stats, num_experts):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, default="wikitext-2", choices=["wikitext-2", "wikitext-103"],
+    parser.add_argument("--dataset", type=str, default="wikitext-103",
+                       choices=["wikitext-2", "wikitext-103", "pile-bookcorpus2", "pile-openwebtext2"],
                        help="Dataset to use")
     parser.add_argument("--samples", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=5)
@@ -344,7 +350,7 @@ def main():
 
     # Load data
     cache_dir = download_wikitext2(dataset=args.dataset)
-    texts = load_wikitext(cache_dir, args.dataset, args.samples)
+    train_texts, val_texts = load_wikitext(cache_dir, args.dataset, args.samples)
 
     tokenizer = make_tokenizer(type("C", (), {"vocab_size": 50257})())
     class DS(torch.utils.data.Dataset):
@@ -354,8 +360,14 @@ def main():
         def __getitem__(self, i):
             return self.tok(self.texts[i], return_tensors="pt", max_length=self.ms, truncation=True)["input_ids"].squeeze(0)
 
-    ds = DS(texts, tokenizer, 256)
-    tr, va = random_split(ds, [int(len(ds)*0.8), len(ds)-int(len(ds)*0.8)])
+    if val_texts is not None:
+        tr = DS(train_texts, tokenizer, 256)
+        va = DS(val_texts, tokenizer, 256)
+        print(f"[Data] Train: {len(tr)}, Val: {len(va)}")
+    else:
+        ds = DS(train_texts, tokenizer, 256)
+        tr, va = random_split(ds, [int(len(ds)*0.8), len(ds)-int(len(ds)*0.8)])
+
     trl = DataLoader(tr, batch_size=16, shuffle=True, collate_fn=collate_fn)
     val = DataLoader(va, batch_size=16, shuffle=False, collate_fn=collate_fn)
     print(f"Data: {len(tr)} train, {len(va)} val, {len(trl)} batches/train")
