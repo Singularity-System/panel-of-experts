@@ -114,6 +114,18 @@ def load_wikitext(cache_dir, dataset="wikitext-2", num_samples=None):
                 print(f"[Data] Loaded {len(lines)} lines")
                 return lines
 
+    # Also try pile datasets
+    pile_names = ["pile-bookcorpus2", "pile-openwebtext2", "pile-bookcorpus", "pile-openwebtext"]
+    for name in pile_names:
+        path = os.path.join(cache_dir, name, "train.txt")
+        if os.path.exists(path):
+            print(f"[Data] Using: {path}")
+            with open(path, "r") as f:
+                lines = [s.strip() for s in f if len(s.strip()) > 20]
+            lines = lines[:num_samples] if num_samples else lines
+            print(f"[Data] Loaded {len(lines)} lines")
+            return lines
+
     raise FileNotFoundError(f"Wikitext dataset not found! Dataset: {dataset}")
 
 
