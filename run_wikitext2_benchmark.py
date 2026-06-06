@@ -358,14 +358,10 @@ def main():
     # Experiment Configs
     # ============================================================
     configs = [
-        # (name, type, kwargs)
-        ("PPoT-Baseline", "poe", {"lb": 0.0, "div": 0.0}),
-        ("PPoT-LB", "poe", {"lb": 0.1, "div": 0.0}),
-        ("PPoT-Div", "poe", {"lb": 0.0, "div": 0.5}),
-        ("PPoT-LB+Div", "poe", {"lb": 0.1, "div": 0.5}),
         ("Transformer-5L", "tf", {"nl": 5}),
         ("Transformer-8L", "tf", {"nl": 8}),
         ("Transformer-12L", "tf", {"nl": 12}),
+        ("PPoT-LB+Div", "poe", {"lb": 0.1, "div": 0.5}),
     ]
 
     results = []
@@ -441,7 +437,7 @@ def main():
     # ============================================================
     # Comparisons vs Baseline
     # ============================================================
-    baseline = [r for r in results if r["name"] == "PPoT-Baseline"][0]
+    baseline = [r for r in results if r["name"] == "PPoT-LB+Div"][0]
     print(f"\n{'='*70}")
     print(f"  VS PPoT-Baseline")
     print(f"{'='*70}")
