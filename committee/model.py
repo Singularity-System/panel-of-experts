@@ -55,32 +55,57 @@ class CommitteeModel(nn.Module):
         self.num_experts = config.num_experts
         self.d_model = config.d_model
 
-        # Embeddings
+        # Auto-detect GPUs and distribute experts
+        if torch.cuda.is_available():
+            self.num_gpus = torch.cuda.device_count()
+            print(f"[Committee] Auto-detected {self.num_gpus} GPU(s)")
+        else:
+            self.num_gpus = 1
+            print("[Committee] No GPU detected, using CPU")
+
+        # Embeddings (on primary device)
         self.wte = nn.Embedding(config.vocab_size, config.d_model)
         self.wpe = nn.Embedding(config.max_seq_len, config.d_model)
         self.dropout = nn.Dropout(0.1)
 
-        # Experts
-        self.experts = nn.ModuleList([
-            Expert(
+        # Experts — distribute across GPUs
+        self.experts = nn.ModuleList()
+        self.expert_devices = []  # Track which GPU each expert is on
+
+        for i in range(config.num_experts):
+            expert = Expert(
                 num_layers=config.expert_num_layers,
                 d_model=config.d_model,
                 n_head=config.n_head,
                 d_ff=config.d_ff
             )
-            for _ in range(config.num_experts)
-        ])
+            # Assign expert to GPU (round-robin)
+            if self.num_gpus > 1:
+                device_idx = i % self.num_gpus
+                device = torch.device(f"cuda:{device_idx}")
+            else:
+                device = torch.device("cpu")
 
-        # Chair: fuses N expert vectors per position via self-attention
+            expert.to(device)
+            self.experts.append(expert)
+            self.expert_devices.append(device)
+
+        print(f"[Committee] Distributed {config.num_experts} experts across {self.num_gpus} GPU(s)")
+        print(f"[Committee] Expert distribution: {[f'E{i}→{d}' for i, d in enumerate(self.expert_devices)]}")
+
+        # Chair — on primary device (cuda:0)
+        primary_device = torch.device("cuda:0") if self.num_gpus > 1 else torch.device("cpu")
         self.chair = Chair(
             d_model=config.d_model,
             n_head=config.n_head,
             d_ff=config.d_ff,
             num_layers=config.chair_num_layers
         )
+        self.chair.to(primary_device)
 
-        # LM head
+        # LM head — on primary device
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+        self.lm_head.to(primary_device)
 
         # Weight tying
         self.wte.weight = self.lm_head.weight
@@ -89,6 +114,14 @@ class CommitteeModel(nn.Module):
 
         # Store for diversity loss
         self._last_expert_vectors = None
+
+        # Compile model for faster execution (PyTorch 2.0+, only on GPU)
+        if self.num_gpus > 1 and hasattr(torch, 'compile'):
+            try:
+                self.forward = torch.compile(self.forward)
+                print("[Committee] torch.compile enabled")
+            except:
+                print("[Committee] torch.compile failed, using original execution")
 
         # Hyperparameter
         self.div_loss_weight = config.div_loss_weight
@@ -124,15 +157,22 @@ class CommitteeModel(nn.Module):
         x = self.wte(input_ids) + self.wpe(pos_ids)
         x = self.dropout(x)  # (B, S, D)
 
-        # Step 1: Parallel expert processing
-        # Stack input N times → (N, B, S, D), process all experts in parallel
-        N = self.num_experts
-        x_stacked = x.unsqueeze(0).expand(N, -1, -1, -1)  # (N, B, S, D)
-
+        # Step 1: Parallel expert processing (distribute across GPUs)
         expert_outputs = []
+        main_device = input_ids.device  # Primary device (where labels are)
+
         for i, expert in enumerate(self.experts):
-            out = expert(x_stacked[i], attention_mask)  # (B, S, D)
-            expert_outputs.append(out)
+            expert_device = self.expert_devices[i]
+
+            # Move input to expert's GPU
+            expert_input = x.to(expert_device)
+            expert_mask = attention_mask.to(expert_device) if attention_mask is not None else None
+
+            # Expert processes full sequence on its GPU
+            out = expert(expert_input, expert_mask)  # (B, S, D)
+
+            # Move result back to main device
+            expert_outputs.append(out.to(main_device))
 
         # Step 2: Stack N experts → (B, S, N, D) — preserves S!
         expert_vectors = torch.stack(expert_outputs, dim=2)  # (B, S, N, D)
