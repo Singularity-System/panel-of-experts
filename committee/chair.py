@@ -1,14 +1,13 @@
 import copy
 import torch
 import torch.nn as nn
-from typing import Optional
 
 
 class Chair(nn.Module):
-    """Chair: processes a single committee representation vector.
+    """Chair: fuses N expert vectors via self-attention.
 
-    Takes the compressed representation (B, D) and produces a refined
-    representation through a single TransformerEncoderLayer.
+    Takes (B, N, D) — N expert vectors — and fuses them via self-attention
+    on the N dimension, then aggregates to (B, D).
 
     Args:
         d_model: Hidden dimension
@@ -29,13 +28,14 @@ class Chair(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: (B, D) single committee representation vector
+            x: (B, N, D) N expert vectors per sample
 
         Returns:
-            (B, D) refined committee representation
+            (B, D) aggregated committee representation
         """
-        # TransformerEncoderLayer expects (B, S, D), so add sequence dim
-        x = x.unsqueeze(1)  # (B, 1, D)
+        # Self-attention across N experts
         for layer in self.layers:
-            x = layer(x)
-        return self.norm(x).squeeze(1)  # (B, D)
+            x = layer(x)  # (B, N, D) — attention across expert dimension
+        # Aggregate: mean over experts
+        x = x.mean(dim=1)  # (B, D)
+        return self.norm(x)

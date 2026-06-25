@@ -36,12 +36,13 @@ class CommitteeConfig:
 class CommitteeModel(nn.Module):
     """Committee Architecture.
 
-    Design:
+    Design (correct):
         1. Broadcast input to all experts
-        2. Each expert processes the full sequence
-        3. Average-pool each expert's output → one vector per expert
-        4. Tree-based merge → single committee representation
-        5. Chair → final output
+        2. Each expert processes the full sequence → (B, S, D)
+        3. compress_sequence per expert: (B, S, D) → (B, D) — compresses sequence, keeps expert!
+        4. Stack N experts → (B, N, D)
+        5. Chair processes (B, N, D) — self-attention across N experts → (B, D)
+        6. LM head → (B, V)
 
     Args:
         config: CommitteeConfig
@@ -68,7 +69,7 @@ class CommitteeModel(nn.Module):
             for _ in range(config.num_experts)
         ])
 
-        # Chair
+        # Chair: fuses N expert vectors via self-attention
         self.chair = Chair(
             d_model=config.d_model,
             n_head=config.n_head,
@@ -110,7 +111,7 @@ class CommitteeModel(nn.Module):
             labels: (B, S) labels for loss
 
         Returns:
-            dict with 'loss', 'logits', and optionally 'div_loss'
+            dict with 'loss', 'logits'
         """
         B, S = input_ids.shape
         if attention_mask is None:
@@ -122,37 +123,35 @@ class CommitteeModel(nn.Module):
         x = self.dropout(x)  # (B, S, D)
 
         # Step 1: Broadcast to all experts
+        # Each expert processes full sequence → (B, S, D)
         expert_outputs = []
         for expert in self.experts:
             out = expert(x, attention_mask)  # (B, S, D)
             expert_outputs.append(out)
 
-        # Step 2: Average-pool each expert's output → one vector per expert
-        # (B, S, D) → (B, D)
+        # Step 2: Compress sequence for EACH expert → (B, D)
+        # compress_sequence operates on the sequence dimension (S), not expert dimension!
+        # This preserves N expert vectors!
         expert_vectors = []
-        for out in expert_outputs:
-            # Weighted average by attention mask
-            mask = attention_mask.unsqueeze(-1).float()  # (B, S, 1)
-            pooled = (out * mask).sum(dim=1) / (mask.sum(dim=1) + 1e-8)  # (B, D)
-            expert_vectors.append(pooled)
+        for out in expert_outputs:  # out: (B, S, D)
+            # Apply tree-based merge on sequence dimension
+            compressed = compress_sequence(out)  # (B, D)
+            expert_vectors.append(compressed)
 
-        # Stack: (B, N, D) where N = num_experts
+        # Stack: (B, N, D) — N expert vectors preserved!
         expert_vectors = torch.stack(expert_vectors, dim=1)  # (B, N, D)
 
-        # Step 3: Tree-based merge → (B, D)
-        committee_repr = compress_sequence(expert_vectors)  # (B, D)
+        # Step 3: Chair — self-attention across N experts
+        # Chair receives (B, N, D), does self-attention on N dimension
+        # → aggregates to (B, D)
+        chair_out = self.chair(expert_vectors)  # (B, D)
 
-        # Step 4: Chair → refine single committee representation
-        # (B, D) → (B, D) — no sequence expansion!
-        chair_out = self.chair(committee_repr)  # (B, D)
-
-        # Step 5: LM head → predict next token
-        logits = self.lm_head(chair_out)  # (B, V) — single token prediction
+        # Step 4: LM head → predict next token
+        logits = self.lm_head(chair_out)  # (B, V)
 
         # Loss: predict the last valid token in each sequence
         loss = None
         if labels is not None:
-            # Get last valid token index for each sample
             last_indices = attention_mask.sum(dim=1).long() - 1  # (B,)
             last_tokens = labels[torch.arange(B), last_indices]  # (B,)
             loss = torch.nn.functional.cross_entropy(logits, last_tokens)
@@ -163,15 +162,10 @@ class CommitteeModel(nn.Module):
         return {"loss": loss, "logits": logits}
 
     def diversity_loss(self) -> torch.Tensor:
-        """Compute diversity loss per-sample, then average.
-
-        This is more stable than cross-batch averaging when sequences
-        have different lengths.
-        """
+        """Compute diversity loss per-sample, then average."""
         if self._last_expert_vectors is None:
             return torch.tensor(0.0, device=self.wte.weight.device)
 
-        # (B, N, D) → compute div_loss for each sample → average
         B = self._last_expert_vectors.size(0)
         losses = []
         for b in range(B):
