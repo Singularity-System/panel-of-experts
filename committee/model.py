@@ -124,10 +124,14 @@ class CommitteeModel(nn.Module):
         x = self.wte(input_ids) + self.wpe(pos_ids)
         x = self.dropout(x)  # (B, S, D)
 
-        # Step 1: Each expert processes full sequence → (B, S, D)
+        # Step 1: Parallel expert processing
+        # Stack input N times → (N, B, S, D), process all experts in parallel
+        N = self.num_experts
+        x_stacked = x.unsqueeze(0).expand(N, -1, -1, -1)  # (N, B, S, D)
+
         expert_outputs = []
-        for expert in self.experts:
-            out = expert(x, attention_mask)  # (B, S, D)
+        for i, expert in enumerate(self.experts):
+            out = expert(x_stacked[i], attention_mask)  # (B, S, D)
             expert_outputs.append(out)
 
         # Step 2: Stack N experts → (B, S, N, D) — preserves S!
