@@ -3,7 +3,6 @@ import torch.nn as nn
 from typing import Optional
 
 from .expert import Expert
-from .compress import compress_sequence
 from .chair import Chair
 from .loss import div_loss
 
@@ -36,13 +35,16 @@ class CommitteeConfig:
 class CommitteeModel(nn.Module):
     """Committee Architecture.
 
-    Design (correct):
+    Design (correct for LM):
         1. Broadcast input to all experts
         2. Each expert processes the full sequence → (B, S, D)
-        3. compress_sequence per expert: (B, S, D) → (B, D) — compresses sequence, keeps expert!
-        4. Stack N experts → (B, N, D)
-        5. Chair processes (B, N, D) — self-attention across N experts → (B, D)
-        6. LM head → (B, V)
+        3. Stack N experts → (B, S, N, D) — preserves S!
+        4. Chair fuses N experts per position → (B, S, D)
+        5. LM head → (B, S, V)
+        6. Shift loss: position i predicts position i+1
+
+    compress_sequence is NOT used in training — it's reserved for inference
+    or other tasks where sequence compression is needed.
 
     Args:
         config: CommitteeConfig
@@ -69,7 +71,7 @@ class CommitteeModel(nn.Module):
             for _ in range(config.num_experts)
         ])
 
-        # Chair: fuses N expert vectors via self-attention
+        # Chair: fuses N expert vectors per position via self-attention
         self.chair = Chair(
             d_model=config.d_model,
             n_head=config.n_head,
@@ -122,53 +124,52 @@ class CommitteeModel(nn.Module):
         x = self.wte(input_ids) + self.wpe(pos_ids)
         x = self.dropout(x)  # (B, S, D)
 
-        # Step 1: Broadcast to all experts
-        # Each expert processes full sequence → (B, S, D)
+        # Step 1: Each expert processes full sequence → (B, S, D)
         expert_outputs = []
         for expert in self.experts:
             out = expert(x, attention_mask)  # (B, S, D)
             expert_outputs.append(out)
 
-        # Step 2: Compress sequence for EACH expert → (B, D)
-        # compress_sequence operates on the sequence dimension (S), not expert dimension!
-        # This preserves N expert vectors!
-        expert_vectors = []
-        for out in expert_outputs:  # out: (B, S, D)
-            # Apply tree-based merge on sequence dimension
-            compressed = compress_sequence(out)  # (B, D)
-            expert_vectors.append(compressed)
+        # Step 2: Stack N experts → (B, S, N, D) — preserves S!
+        expert_vectors = torch.stack(expert_outputs, dim=2)  # (B, S, N, D)
 
-        # Stack: (B, N, D) — N expert vectors preserved!
-        expert_vectors = torch.stack(expert_vectors, dim=1)  # (B, N, D)
+        # Step 3: Chair fuses N experts per position → (B, S, D)
+        chair_out = self.chair(expert_vectors)  # (B, S, D)
 
-        # Step 3: Chair — self-attention across N experts
-        # Chair receives (B, N, D), does self-attention on N dimension
-        # → aggregates to (B, D)
-        chair_out = self.chair(expert_vectors)  # (B, D)
+        # Step 4: LM head → (B, S, V)
+        logits = self.lm_head(chair_out)  # (B, S, V)
 
-        # Step 4: LM head → predict next token
-        logits = self.lm_head(chair_out)  # (B, V)
-
-        # Loss: predict the last valid token in each sequence
+        # Step 5: Shift loss — position i predicts position i+1
         loss = None
         if labels is not None:
-            last_indices = attention_mask.sum(dim=1).long() - 1  # (B,)
-            last_tokens = labels[torch.arange(B), last_indices]  # (B,)
-            loss = torch.nn.functional.cross_entropy(logits, last_tokens)
+            shift_logits = logits[..., :-1, :].contiguous()  # (B, S-1, V)
+            shift_labels = labels[..., 1:].contiguous()  # (B, S-1)
+            shift_mask = attention_mask[..., 1:].contiguous()  # (B, S-1)
+            mask_expanded = shift_mask.view(-1)
+            loss = torch.nn.functional.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1))[mask_expanded.bool()],
+                shift_labels.view(-1)[mask_expanded.bool()]
+            )
 
         # Store for diversity loss
-        self._last_expert_vectors = expert_vectors  # (B, N, D)
+        self._last_expert_vectors = expert_vectors  # (B, S, N, D)
 
         return {"loss": loss, "logits": logits}
 
     def diversity_loss(self) -> torch.Tensor:
-        """Compute diversity loss per-sample, then average."""
+        """Compute diversity loss per-sample, then average.
+
+        (B, S, N, D) → average over S → (B, N, D) → per-sample div_loss → average over B
+        """
         if self._last_expert_vectors is None:
             return torch.tensor(0.0, device=self.wte.weight.device)
 
-        B = self._last_expert_vectors.size(0)
+        # (B, S, N, D) → mean over S → (B, N, D)
+        expert_means = self._last_expert_vectors.mean(dim=1)  # (B, N, D)
+
+        B = expert_means.size(0)
         losses = []
         for b in range(B):
-            vectors = self._last_expert_vectors[b]  # (N, D)
+            vectors = expert_means[b]  # (N, D)
             losses.append(div_loss(vectors))
         return torch.stack(losses).mean()

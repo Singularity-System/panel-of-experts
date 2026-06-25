@@ -4,10 +4,10 @@ import torch.nn as nn
 
 
 class Chair(nn.Module):
-    """Chair: fuses N expert vectors via self-attention.
+    """Chair: fuses N expert vectors per position.
 
-    Takes (B, N, D) — N expert vectors — and fuses them via self-attention
-    on the N dimension, then aggregates to (B, D).
+    Takes (B, S, N, D) and fuses N experts at each position via self-attention,
+    outputting (B, S, D). Preserves sequence dimension for LM training.
 
     Args:
         d_model: Hidden dimension
@@ -28,14 +28,19 @@ class Chair(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: (B, N, D) N expert vectors per sample
+            x: (B, S, N, D) N expert vectors per (B, S) position
 
         Returns:
-            (B, D) aggregated committee representation
+            (B, S, D) fused representation per position
         """
-        # Self-attention across N experts
+        B, S, N, D = x.shape
+        # Reshape: (B*S, N, D) — treat each position independently
+        x = x.view(B * S, N, D)
+        # Self-attention across N experts at each position
         for layer in self.layers:
-            x = layer(x)  # (B, N, D) — attention across expert dimension
-        # Aggregate: mean over experts
-        x = x.mean(dim=1)  # (B, D)
+            x = layer(x)  # (B*S, N, D)
+        # Aggregate: mean over experts → (B*S, D)
+        x = x.mean(dim=1)  # (B*S, D)
+        # Reshape back: (B, S, D)
+        x = x.view(B, S, D)
         return self.norm(x)
