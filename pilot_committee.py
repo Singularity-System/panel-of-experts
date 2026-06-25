@@ -191,6 +191,8 @@ def main():
         div_loss_weight=0.5
     )
     committee_model = CommitteeModel(cfg)
+    print("[Speed] Using original for-loop (torch.compile not available on Mac)")
+
     t0 = time.time()
     train_model(committee_model, trl, args.epochs, device, div_alpha=0.5)
     committee_time = time.time() - t0
