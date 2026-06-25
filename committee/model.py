@@ -142,25 +142,20 @@ class CommitteeModel(nn.Module):
         # Step 3: Tree-based merge → (B, D)
         committee_repr = compress_sequence(expert_vectors)  # (B, D)
 
-        # Step 4: Chair → expand to sequence and process
-        # (B, D) → (B, S, D) by repeating
-        committee_repr_expanded = committee_repr.unsqueeze(1).expand(-1, S, -1)  # (B, S, D)
-        chair_out = self.chair(committee_repr_expanded, attention_mask)  # (B, S, D)
+        # Step 4: Chair → refine single committee representation
+        # (B, D) → (B, D) — no sequence expansion!
+        chair_out = self.chair(committee_repr)  # (B, D)
 
-        # Step 5: LM head
-        logits = self.lm_head(chair_out)  # (B, S, V)
+        # Step 5: LM head → predict next token
+        logits = self.lm_head(chair_out)  # (B, V) — single token prediction
 
-        # Loss
+        # Loss: predict the last valid token in each sequence
         loss = None
         if labels is not None:
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            shift_mask = attention_mask[..., 1:].contiguous()
-            mask_expanded = shift_mask.view(-1)
-            loss = torch.nn.functional.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1))[mask_expanded.bool()],
-                shift_labels.view(-1)[mask_expanded.bool()]
-            )
+            # Get last valid token index for each sample
+            last_indices = attention_mask.sum(dim=1).long() - 1  # (B,)
+            last_tokens = labels[torch.arange(B), last_indices]  # (B,)
+            loss = torch.nn.functional.cross_entropy(logits, last_tokens)
 
         # Store for diversity loss
         self._last_expert_vectors = expert_vectors  # (B, N, D)
@@ -168,10 +163,18 @@ class CommitteeModel(nn.Module):
         return {"loss": loss, "logits": logits}
 
     def diversity_loss(self) -> torch.Tensor:
-        """Compute diversity loss over expert vectors."""
+        """Compute diversity loss per-sample, then average.
+
+        This is more stable than cross-batch averaging when sequences
+        have different lengths.
+        """
         if self._last_expert_vectors is None:
             return torch.tensor(0.0, device=self.wte.weight.device)
 
-        # (B, N, D) → average over batch → (N, D)
-        mean_vectors = self._last_expert_vectors.mean(dim=0)  # (N, D)
-        return div_loss(mean_vectors)
+        # (B, N, D) → compute div_loss for each sample → average
+        B = self._last_expert_vectors.size(0)
+        losses = []
+        for b in range(B):
+            vectors = self._last_expert_vectors[b]  # (N, D)
+            losses.append(div_loss(vectors))
+        return torch.stack(losses).mean()

@@ -30,9 +30,11 @@ def compress_sequence(sequences: torch.Tensor) -> torch.Tensor:
 
     Tree structure:
         [a, b, c, d, e]
-        → [merge(a,b), merge(c,d), e]
-        → [merge(merge(a,b), merge(c,d)), e]
-        → [merge(..., e)]
+        → [merge(a,b), merge(c,d), merge(e,a)]  ← odd element merges with first
+        → [merge(merge(a,b), merge(c,d)), merge(e,a)]
+        → [merge(..., merge(e,a))]
+
+    All elements participate in merging — no orphan inheritance.
 
     Args:
         sequences: (B, N, D) batch of N expert vectors
@@ -55,7 +57,9 @@ def compress_sequence(sequences: torch.Tensor) -> torch.Tensor:
                 merged = merge(current[:, i, :], current[:, i + 1, :])  # (B, D)
                 new_seq.append(merged.unsqueeze(1))  # (B, 1, D)
             else:
-                new_seq.append(current[:, i, :].unsqueeze(1))  # (B, 1, D)
+                # Odd element: merge with first element of this round instead of inheriting
+                merged = merge(current[:, i, :], current[:, 0, :])  # (B, D)
+                new_seq.append(merged.unsqueeze(1))
         current = torch.cat(new_seq, dim=1)  # (B, new_seq_len, D)
 
     return current.squeeze(1)  # (B, D)

@@ -78,13 +78,15 @@ def evaluate(model, dataloader, device):
         for batch in tqdm(dataloader, desc="Eval"):
             outputs = model(input_ids=batch["input_ids"].to(device), attention_mask=batch["attention_mask"].to(device), labels=batch["labels"].to(device))
             total_loss += outputs["loss"].item()
-            logits = outputs["logits"]
-            sl = logits[..., :-1, :].contiguous()
-            slb = batch["labels"][..., 1:].contiguous()
-            sm = batch["attention_mask"][..., 1:].contiguous()
-            preds = sl.argmax(-1)
-            total_correct += ((preds == slb.to(preds.device)) & (sm.to(preds.device) == 1)).sum().item()
-            total_tokens += sm.sum().item()
+            # Committee outputs (B, V), labels are (B,)
+            logits = outputs["logits"]  # (B, V)
+            B = batch["labels"].size(0)
+            attention_mask = batch["attention_mask"]
+            last_indices = attention_mask.sum(dim=1).long() - 1
+            true_tokens = batch["labels"][torch.arange(B), last_indices]
+            preds = logits.argmax(-1)
+            total_correct += (preds == true_tokens.to(preds.device)).sum().item()
+            total_tokens += B
     avg = total_loss / len(dataloader)
     return {"loss": avg, "ppl": math.exp(avg), "acc": total_correct / max(total_tokens, 1)}
 

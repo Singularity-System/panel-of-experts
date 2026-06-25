@@ -5,9 +5,10 @@ from typing import Optional
 
 
 class Chair(nn.Module):
-    """Chair: single-layer Transformer for committee fusion.
+    """Chair: processes a single committee representation vector.
 
-    Takes the compressed committee representation and produces final output.
+    Takes the compressed representation (B, D) and produces a refined
+    representation through a single TransformerEncoderLayer.
 
     Args:
         d_model: Hidden dimension
@@ -25,20 +26,16 @@ class Chair(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.d_model = d_model
 
-    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: (B, S, D) input
-            attention_mask: (B, S) attention mask
+            x: (B, D) single committee representation vector
 
         Returns:
-            (B, S, D) output
+            (B, D) refined committee representation
         """
-        key_padding_mask = None
-        if attention_mask is not None:
-            key_padding_mask = ~(attention_mask.bool())
-
-        output = x
+        # TransformerEncoderLayer expects (B, S, D), so add sequence dim
+        x = x.unsqueeze(1)  # (B, 1, D)
         for layer in self.layers:
-            output = layer(output, src_key_padding_mask=key_padding_mask)
-        return self.norm(output)
+            x = layer(x)
+        return self.norm(x).squeeze(1)  # (B, D)
