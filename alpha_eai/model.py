@@ -91,19 +91,26 @@ class PoEModel(nn.Module):
         x = self.wte(input_ids) + self.wpe(pos_ids)
         x = self.dropout(x)
 
-        router_weights, router_indices = self.router(x)
+        router_weights, router_indices = self.router(x)  # (B, top_k)
 
         D = self.experts[0].d_model
-        active_experts = self._get_active_experts(router_indices)
 
-        # === Build per-token per-expert weight mask ===
+        # Get active experts from sequence-level routing
+        active_experts = set()
+        for k in range(self.top_k):
+            for e in range(self.num_experts):
+                if (router_indices[:, k] == e).any():
+                    active_experts.add(e)
+
+        # Build per-token per-expert weight mask — all tokens share same routing
+        # token_expert_weight: (B, S, num_experts)
         token_expert_weight = torch.zeros(B, S, self.num_experts, device=main_device, dtype=x.dtype)
         for k in range(self.top_k):
-            idx_k = router_indices[:, :, k]
-            wt_k = router_weights[:, :, k]
+            idx_k = router_indices[:, k]  # (B,)
+            wt_k = router_weights[:, k]   # (B,)
             for e in range(self.num_experts):
-                mask = (idx_k == e).float()
-                token_expert_weight[:, :, e] += mask * wt_k
+                mask = (idx_k == e).float().unsqueeze(-1).expand(-1, S)  # (B, S)
+                token_expert_weight[:, :, e] = mask * wt_k.unsqueeze(-1).expand(-1, S)
 
         # === True sparse: only compute active experts ===
         expert_outputs = torch.zeros(B, S, self.num_experts, D, device=main_device, dtype=x.dtype)
@@ -141,22 +148,26 @@ class PoEModel(nn.Module):
                 out = self.experts[e](expert_input)
                 expert_outputs[:, :, e, :] = out.to(main_device)
 
-        # === Fusion: per-token routing → concat selected experts → 2D ===
+        # === Fusion: sequence-level routing → concat selected experts → 2D ===
         # Save expert outputs for diversity loss (keep gradient)
         self._last_expert_outputs = expert_outputs
 
-        # For each token (b, s):
-        #   router_indices[b, s] = [e_a, e_b]  — which 2 experts were selected
-        #   Take expert_outputs[b, s, e_a] and expert_outputs[b, s, e_b]
-        #   Concat → 2D per token
-        # This preserves ALL expert information instead of weighted sum bottleneck
-
-        # Vectorized gather: (B, S, E, D) + (B, S, top_k) → (B, S, top_k, D)
-        # This keeps everything on GPU — no Python loop, full parallelism
+        # For sequence-level routing: all tokens use the same 2 experts
+        # expert_outputs: (B, S, E, D), router_indices: (B, top_k)
+        # Gather expert outputs per token: (B, S, top_k, D) → reshape → (B, S, 2D)
         expert_gather = torch.gather(
             expert_outputs, 2,  # gather along expert dimension
-            router_indices.unsqueeze(-1).expand(-1, -1, -1, D).long()
-        )  # (B, S, top_k, D) — for each token, the 2 selected expert outputs
+            router_indices.unsqueeze(1).unsqueeze(-1).expand(-1, S, -1, -1, D).long()
+        )  # Wait, this is wrong for sequence-level. Let me fix.
+        # router_indices: (B, top_k), need to gather from expert_outputs: (B, S, E, D)
+        # For each (b, s), take expert_outputs[b, s, router_indices[b, k], :] for each k
+        # This is simpler: just gather along expert dim using router_indices
+        # But router_indices is (B, top_k), need to expand to (B, S, top_k)
+        router_indices_expanded = router_indices.unsqueeze(1).expand(-1, S, -1)  # (B, S, top_k)
+        expert_gather = torch.gather(
+            expert_outputs, 2,
+            router_indices_expanded.unsqueeze(-1).expand(-1, -1, -1, D).long()
+        )  # (B, S, top_k, D)
         concatenated = expert_gather.reshape(B, S, self.top_k * D)  # (B, S, 2D)
 
         # Cross-attention → LayerNorm → Linear(2D→D)

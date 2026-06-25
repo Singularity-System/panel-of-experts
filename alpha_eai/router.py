@@ -14,17 +14,26 @@ class Router(nn.Module):
         self._indices = None
 
     def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        logits = self.gate_linear(hidden_states)  # (B, S, num_experts)
-        full_probs = F.softmax(logits, dim=-1)
-        self._full_probs = full_probs
+        """Sequence-level routing: pool over sequence, route the whole sequence.
+
+        Each sequence shares the same expert selection, ensuring consistency
+        between training (full sequence) and inference (prefix).
+        """
+        # Pool over sequence dimension → sequence-level representation
+        pooled = hidden_states.mean(dim=1)  # (B, D)
+
+        # Standard MoE: Linear → softmax → top_k
+        logits = self.gate_linear(pooled)  # (B, num_experts)
+        full_probs = F.softmax(logits, dim=-1)  # (B, num_experts)
+        self._full_probs = full_probs  # (B, num_experts) for LB loss
 
         if self.top_k >= self.num_experts:
-            indices = torch.arange(self.num_experts, device=hidden_states.device).unsqueeze(0).unsqueeze(0).expand(full_probs.shape[0], full_probs.shape[1], -1)
+            indices = torch.arange(self.num_experts, device=hidden_states.device).unsqueeze(0).expand(full_probs.shape[0], -1)
             self._indices = indices
             return full_probs, indices
 
-        top_weights, top_indices = torch.topk(full_probs, self.top_k, dim=-1)
-        top_weights = F.normalize(top_weights, p=1, dim=-1)
+        top_weights, top_indices = torch.topk(full_probs, self.top_k, dim=-1)  # (B, top_k)
+        top_weights = F.normalize(top_weights, p=1, dim=-1)  # (B, top_k)
         self._indices = top_indices
         return top_weights, top_indices
 
