@@ -89,26 +89,106 @@ def evaluate(model, dataloader, device):
     return {"loss": avg, "ppl": math.exp(avg), "acc": total_correct / max(total_tokens, 1)}
 
 
-def train_model(model, trl, epochs, device, div_alpha=0.0):
+def compute_eta_ce(current_loss, prev_loss, prev_prev_loss, momentum=0.9):
+    """Compute adaptive FE weight from CE loss dynamics.
+
+    eta_ce = (prev_loss - current_loss) / (prev_prev_loss - prev_loss + epsilon)
+    This measures the "acceleration" of loss reduction.
+
+    Args:
+        current_loss: Current CE loss
+        prev_loss: Previous step CE loss (EMA)
+        prev_prev_loss: Previous-previous step CE loss (EMA)
+        momentum: EMA decay factor
+
+    Returns:
+        Adaptive FE weight (clamped to [0.1, 10.0])
+    """
+    if prev_prev_loss is None or prev_loss is None:
+        return 0.5  # Default weight during warmup
+
+    # Loss velocity (how fast is loss decreasing)
+    velocity = prev_loss - current_loss
+    # Loss acceleration (is the velocity increasing or decreasing?)
+    prev_velocity = prev_prev_loss - prev_loss
+
+    if abs(prev_velocity) < 1e-6:
+        return 0.5  # Default if no change
+
+    # If velocity is positive (loss decreasing), keep weight moderate
+    # If velocity is negative (loss increasing), reduce weight
+    eta_ce = max(0.1, min(10.0, abs(velocity) / (abs(prev_velocity) + 1e-6)))
+    return eta_ce
+
+
+def train_model(model, trl, epochs, device, use_adaptive_fe=False):
+    """
+    Train Committee model with optional adaptive FE weight.
+
+    Args:
+        model: CommitteeModel
+        trl: Training dataloader
+        epochs: Number of epochs
+        device: Training device
+        use_adaptive_fe: If True, use max(0.1, eta_ce) instead of fixed div_loss_weight
+    """
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
     total_steps = len(trl) * epochs
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(total_steps*0.05), num_training_steps=total_steps)
 
+    # For adaptive FE
+    ce_loss_ema = None
+    prev_ce_loss = None
+    prev_prev_ce_loss = None
+    momentum = 0.9
+
     for epoch in range(1, epochs + 1):
         model.train()
         pbar = tqdm(trl, desc=f"Epoch {epoch}/{epochs}")
-        for batch in pbar:
+        for step, batch in enumerate(pbar):
             outputs = model(input_ids=batch["input_ids"].to(device), attention_mask=batch["attention_mask"].to(device), labels=batch["labels"].to(device))
-            loss = outputs["loss"]
-            if div_alpha > 0 and hasattr(model, 'diversity_loss'):
-                loss = loss + div_alpha * model.diversity_loss()
+            ce_loss = outputs["loss"]
+
+            # Update CE loss EMA
+            if ce_loss_ema is None:
+                ce_loss_ema = ce_loss.item()
+            else:
+                ce_loss_ema = momentum * ce_loss_ema + (1 - momentum) * ce_loss.item()
+
+            # Compute FE weight
+            if use_adaptive_fe:
+                fe_weight = compute_eta_ce(ce_loss.item(), ce_loss_ema, prev_ce_loss, momentum)
+                fe_weight = max(0.1, fe_weight)  # Clamp to [0.1, 10]
+            else:
+                fe_weight = model.div_loss_weight  # Use fixed weight from config
+
+            # Track previous losses for adaptive FE
+            prev_prev_ce_loss = prev_ce_loss
+            prev_ce_loss = ce_loss_ema
+
+            # Compute diversity loss and total loss
+            if hasattr(model, 'diversity_loss'):
+                div_loss = model.diversity_loss()
+                loss = ce_loss + fe_weight * div_loss
+            else:
+                loss = ce_loss
+
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             scheduler.step()
-            pbar.set_postfix({"loss": f"{outputs['loss'].item():.4f}"})
+
+            # Update progress bar
+            postfix = {"ce_loss": f"{ce_loss.item():.4f}"}
+            if use_adaptive_fe:
+                postfix["eta"] = f"{fe_weight:.3f}"
+            elif hasattr(model, 'diversity_loss'):
+                div = model.diversity_loss()
+                postfix["div"] = f"{div.item():.4f}"
+            pbar.set_postfix(postfix)
+
     return model
 
 
@@ -191,10 +271,9 @@ def main():
         div_loss_weight=0.5
     )
     committee_model = CommitteeModel(cfg)
-    print("[Speed] Using original for-loop (torch.compile not available on Mac)")
 
     t0 = time.time()
-    train_model(committee_model, trl, args.epochs, device, div_alpha=0.5)
+    train_model(committee_model, trl, args.epochs, device, use_adaptive_fe=True)
     committee_time = time.time() - t0
 
     res_committee = evaluate(committee_model, val, device)

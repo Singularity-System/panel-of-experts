@@ -115,16 +115,12 @@ class CommitteeModel(nn.Module):
         # Store for diversity loss
         self._last_expert_vectors = None
 
-        # Compile model for faster execution (PyTorch 2.0+, only on GPU)
-        if self.num_gpus > 1 and hasattr(torch, 'compile'):
-            try:
-                self.forward = torch.compile(self.forward)
-                print("[Committee] torch.compile enabled")
-            except:
-                print("[Committee] torch.compile failed, using original execution")
-
         # Hyperparameter
         self.div_loss_weight = config.div_loss_weight
+
+        # Note: torch.compile NOT used because cross-device operations
+        # (moving tensors between GPUs) are not compatible with compilation.
+        # The for-loop is actually efficient enough for 8-16 experts.
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
